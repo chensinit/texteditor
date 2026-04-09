@@ -96,6 +96,13 @@ private struct TopToolbarView: View {
             .buttonStyle(.borderless)
 
             Button {
+                openDocumentFile()
+            } label: {
+                Label("Open File", systemImage: "doc.badge.plus")
+            }
+            .buttonStyle(.borderless)
+
+            Button {
                 saveDocument()
             } label: {
                 Label("Save", systemImage: "square.and.arrow.down")
@@ -115,6 +122,43 @@ private struct TopToolbarView: View {
                 workspace.toggleSidebar()
             } label: {
                 Label("Sidebar", systemImage: "sidebar.left")
+            }
+            .buttonStyle(.borderless)
+
+            Divider().frame(height: 20)
+
+            Button {
+                sendAction(#selector(UndoManager.undo))
+            } label: {
+                Label("Undo", systemImage: "arrow.uturn.backward")
+            }
+            .buttonStyle(.borderless)
+
+            Button {
+                sendAction(#selector(UndoManager.redo))
+            } label: {
+                Label("Redo", systemImage: "arrow.uturn.forward")
+            }
+            .buttonStyle(.borderless)
+
+            Button {
+                sendAction(#selector(NSText.cut(_:)))
+            } label: {
+                Label("Cut", systemImage: "scissors")
+            }
+            .buttonStyle(.borderless)
+
+            Button {
+                sendAction(#selector(NSText.copy(_:)))
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+
+            Button {
+                sendAction(#selector(NSText.paste(_:)))
+            } label: {
+                Label("Paste", systemImage: "clipboard")
             }
             .buttonStyle(.borderless)
 
@@ -201,6 +245,23 @@ private struct TopToolbarView: View {
                 workspace.setFileSystemError("Failed to save file: \(document.title) (\(error.localizedDescription))")
             }
         }
+    }
+
+    private func openDocumentFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        panel.message = "Choose a text file."
+
+        if panel.runModal() == .OK, let url = panel.url {
+            workspace.openFile(url)
+        }
+    }
+
+    private func sendAction(_ selector: Selector) {
+        NSApp.sendAction(selector, to: nil, from: nil)
     }
 }
 
@@ -829,6 +890,10 @@ private struct TextInspectorView: View {
                 inspectorRow("Chars", value: "\(characterCount)")
                 inspectorRow("Cursor", value: "Ln \(workspace.currentLineNumber)")
                 inspectorRow("State", value: document?.isDirty == true ? "Unsaved" : "Saved")
+                inspectorRow("Type", value: document?.metadata.kindName ?? "-")
+                inspectorRow("Encoding", value: document?.metadata.encodingName ?? "-")
+                inspectorRow("Line End", value: document?.metadata.lineEnding.rawValue ?? "-")
+                inspectorRow("Access", value: document?.metadata.isReadOnly == true ? "Read Only" : "Writable")
             }
 
             Divider().overlay(Color.white.opacity(0.05))
@@ -964,6 +1029,10 @@ private struct StatusBarView: View {
             Spacer()
             Text(workspace.activeDocument?.title ?? "No File")
             Text(workspace.activeDocument?.isDirty == true ? "Unsaved" : "Saved")
+            if let document = workspace.activeDocument {
+                Text(document.metadata.kindName)
+                Text(document.metadata.encodingName)
+            }
             Text("Ln \(workspace.currentLineNumber), Col \(workspace.currentColumnNumber)")
             if !workspace.search.query.isEmpty {
                 Text(searchSummary)

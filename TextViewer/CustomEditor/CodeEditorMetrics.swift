@@ -12,6 +12,7 @@ enum CodeEditorMetrics {
     static let gutterWidth: CGFloat = 58
     static let horizontalInset: CGFloat = 10
     static let verticalInset: CGFloat = 14
+    static let indentUnit = "    "
 
     static let textFont: NSFont = .monospacedSystemFont(ofSize: textFontSize, weight: .regular)
     static let lineNumberFont: NSFont = .monospacedSystemFont(ofSize: textFontSize, weight: .regular)
@@ -23,4 +24,5 @@ enum CodeEditorMetrics {
     static let currentLineNumberColor = NSColor.white
     static let lineNumberColor = NSColor(calibratedWhite: 0.62, alpha: 1)
     static let currentLineHighlightColor = NSColor.controlAccentColor.withAlphaComponent(0.18)
+    static let currentLineFillColor = NSColor.white.withAlphaComponent(0.035)
 }

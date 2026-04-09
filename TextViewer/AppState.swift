@@ -85,25 +85,55 @@ enum LayoutPreset: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+enum LineEndingKind: String, Hashable {
+    case lf = "LF"
+    case crlf = "CRLF"
+    case cr = "CR"
+    case mixed = "Mixed"
+    case none = "None"
+}
+
+struct DocumentMetadata: Hashable {
+    var encodingName: String
+    var lineEnding: LineEndingKind
+    var isReadOnly: Bool
+    var kindName: String
+    var lastKnownModificationDate: Date?
+
+    static let draft = DocumentMetadata(
+        encodingName: "UTF-8",
+        lineEnding: .none,
+        isReadOnly: false,
+        kindName: "Plain Text",
+        lastKnownModificationDate: nil
+    )
+}
+
 struct DocumentState: Identifiable, Hashable {
     let id: UUID
     var title: String
     var filePath: String?
     var text: String
     var isDirty: Bool
+    var selectionRange: NSRange
+    var metadata: DocumentMetadata
 
     init(
         id: UUID = UUID(),
         title: String,
         filePath: String? = nil,
         text: String = "",
-        isDirty: Bool = false
+        isDirty: Bool = false,
+        selectionRange: NSRange = NSRange(location: 0, length: 0),
+        metadata: DocumentMetadata = .draft
     ) {
         self.id = id
         self.title = title
         self.filePath = filePath
         self.text = text
         self.isDirty = isDirty
+        self.selectionRange = selectionRange
+        self.metadata = metadata
     }
 }
 
@@ -207,12 +237,37 @@ private struct TabSnapshot: Codable {
     var documentPath: String?
     var draftDocumentID: UUID?
     var draftText: String?
+    var draftSelectionLocation: Int?
+    var draftSelectionLength: Int?
     var kind: PaneKind
+}
+
+private enum FileOpenError: LocalizedError {
+    case unreadable
+    case binaryContent
+    case unsupportedEncoding
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable:
+            return "The file could not be read."
+        case .binaryContent:
+            return "The selected file looks like binary data, so it was not opened as text."
+        case .unsupportedEncoding:
+            return "The file encoding is not supported yet."
+        }
+    }
+}
+
+private struct LoadedTextFile {
+    var text: String
+    var metadata: DocumentMetadata
 }
 
 @MainActor
 final class WorkspaceState: ObservableObject {
     private static let sessionDefaultsKey = "workspace.session.snapshot"
+    private static let draftAutosaveDelayNanoseconds: UInt64 = 700_000_000
     @Published var layoutPreset: LayoutPreset = .single
     @Published var sidebar = SidebarState()
     @Published var panes: [PaneState]
@@ -224,8 +279,14 @@ final class WorkspaceState: ObservableObject {
     @Published var fileSystemError: String?
     @Published var pendingCloseConfirmation: PendingCloseState?
     @Published var search = SearchState()
-    @Published var activeSelectionRange = NSRange(location: NSNotFound, length: 0)
+    @Published var activeSelectionRange = NSRange(location: NSNotFound, length: 0) {
+        didSet {
+            syncActiveSelectionRangeToDocument()
+        }
+    }
     @Published var isShowingGoToLine = false
+
+    private var draftAutosaveTask: Task<Void, Never>?
 
     init() {
         let welcomeDocument = DocumentState(
@@ -315,6 +376,7 @@ final class WorkspaceState: ObservableObject {
 
     func setActivePane(_ paneID: UUID) {
         activePaneID = paneID
+        refreshActiveDocumentFromDiskIfNeeded()
         refreshSearchResults()
     }
 
@@ -360,12 +422,19 @@ final class WorkspaceState: ObservableObject {
         let document = DocumentState(title: title, text: "", isDirty: false)
         documents.append(document)
         attachDocumentToTextPane(document)
+        scheduleSessionPersistence(immediate: true)
     }
 
     func selectTab(_ tabID: UUID, in paneID: UUID) {
         guard let paneIndex = panes.firstIndex(where: { $0.id == paneID }) else { return }
         panes[paneIndex].selectedTabID = tabID
         activePaneID = paneID
+        if let selectedDocument = document(for: panes[paneIndex].selectedTab) {
+            activeSelectionRange = selectedDocument.selectionRange
+        } else {
+            activeSelectionRange = NSRange(location: NSNotFound, length: 0)
+        }
+        refreshActiveDocumentFromDiskIfNeeded()
         refreshSearchResults()
     }
 
@@ -490,6 +559,8 @@ final class WorkspaceState: ObservableObject {
             fileTree = []
             fileSystemError = error.localizedDescription
         }
+
+        scheduleSessionPersistence(immediate: true)
     }
 
     func selectFile(_ url: URL) {
@@ -507,19 +578,22 @@ final class WorkspaceState: ObservableObject {
         }
 
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
+            let loadedFile = try Self.loadTextFile(at: url)
             let document = DocumentState(
                 title: url.lastPathComponent,
                 filePath: url.path,
-                text: text,
-                isDirty: false
+                text: loadedFile.text,
+                isDirty: false,
+                metadata: loadedFile.metadata
             )
             documents.append(document)
             attachDocumentToTextPane(document)
             fileSystemError = nil
             refreshSearchResults()
+            scheduleSessionPersistence(immediate: true)
         } catch {
-            fileSystemError = "Failed to open file: \(url.lastPathComponent)"
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            fileSystemError = "Failed to open file: \(url.lastPathComponent) (\(message))"
         }
     }
 
@@ -566,6 +640,43 @@ final class WorkspaceState: ObservableObject {
         fileSystemError = message
     }
 
+    func refreshActiveDocumentFromDiskIfNeeded() {
+        guard let document = activeDocument,
+              let filePath = document.filePath,
+              let currentModificationDate = Self.fileModificationDate(at: URL(fileURLWithPath: filePath)),
+              let documentIndex = documents.firstIndex(where: { $0.id == document.id }) else {
+            return
+        }
+
+        let knownModificationDate = documents[documentIndex].metadata.lastKnownModificationDate
+        guard let knownModificationDate else {
+            documents[documentIndex].metadata.lastKnownModificationDate = currentModificationDate
+            return
+        }
+
+        guard currentModificationDate > knownModificationDate else {
+            return
+        }
+
+        if documents[documentIndex].isDirty {
+            fileSystemError = "File changed externally: \(documents[documentIndex].title). Save or reopen after resolving your edits."
+            documents[documentIndex].metadata.lastKnownModificationDate = currentModificationDate
+            return
+        }
+
+        do {
+            let url = URL(fileURLWithPath: filePath)
+            let loadedFile = try Self.loadTextFile(at: url)
+            documents[documentIndex].text = loadedFile.text
+            documents[documentIndex].metadata = loadedFile.metadata
+            fileSystemError = nil
+            refreshSearchResults()
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            fileSystemError = "Failed to reload file: \(documents[documentIndex].title) (\(message))"
+        }
+    }
+
     private static func loadDirectoryItems(at rootURL: URL) throws -> [FileItem] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey, .isRegularFileKey]
         let urls = try FileManager.default.contentsOfDirectory(
@@ -604,6 +715,131 @@ final class WorkspaceState: ObservableObject {
         return lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
     }
 
+    private static func loadTextFile(at url: URL) throws -> LoadedTextFile {
+        guard let data = try? Data(contentsOf: url) else {
+            throw FileOpenError.unreadable
+        }
+
+        if data.isEmpty {
+            return LoadedTextFile(
+                text: "",
+                metadata: inferMetadata(for: url, text: "", encodingName: "UTF-8")
+            )
+        }
+
+        if looksLikeBinaryData(data) {
+            throw FileOpenError.binaryContent
+        }
+
+        if let decoded = decodeText(data) {
+            return LoadedTextFile(
+                text: decoded.text,
+                metadata: inferMetadata(for: url, text: decoded.text, encodingName: decoded.encodingName)
+            )
+        }
+
+        throw FileOpenError.unsupportedEncoding
+    }
+
+    private static func decodeText(_ data: Data) -> (text: String, encodingName: String)? {
+        let encodings: [(String.Encoding, String)] = [
+            (.utf8, "UTF-8"),
+            (.unicode, "UTF-16"),
+            (.utf16LittleEndian, "UTF-16 LE"),
+            (.utf16BigEndian, "UTF-16 BE")
+        ]
+
+        for (encoding, name) in encodings {
+            if let text = String(data: data, encoding: encoding) {
+                return (text, name)
+            }
+        }
+
+        return nil
+    }
+
+    private static func looksLikeBinaryData(_ data: Data) -> Bool {
+        let sample = data.prefix(4096)
+
+        if sample.contains(0) {
+            return true
+        }
+
+        let suspiciousByteCount = sample.reduce(into: 0) { count, byte in
+            if byte < 0x09 {
+                count += 1
+            } else if byte > 0x0D && byte < 0x20 {
+                count += 1
+            }
+        }
+
+        return Double(suspiciousByteCount) / Double(sample.count) > 0.1
+    }
+
+    private static func inferMetadata(for url: URL, text: String, encodingName: String) -> DocumentMetadata {
+        DocumentMetadata(
+            encodingName: encodingName,
+            lineEnding: inferLineEnding(in: text),
+            isReadOnly: !FileManager.default.isWritableFile(atPath: url.path),
+            kindName: inferKindName(for: url),
+            lastKnownModificationDate: fileModificationDate(at: url)
+        )
+    }
+
+    private static func fileModificationDate(at url: URL) -> Date? {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return values?.contentModificationDate
+    }
+
+    private static func inferLineEnding(in text: String) -> LineEndingKind {
+        let containsCRLF = text.contains("\r\n")
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let containsLF = normalized.contains("\n")
+        let containsCR = normalized.contains("\r")
+
+        let matchCount = [containsCRLF, containsLF, containsCR].filter { $0 }.count
+        if matchCount > 1 {
+            return .mixed
+        }
+        if containsCRLF {
+            return .crlf
+        }
+        if containsLF {
+            return .lf
+        }
+        if containsCR {
+            return .cr
+        }
+        return .none
+    }
+
+    private static func inferKindName(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "md", "markdown":
+            return "Markdown"
+        case "json":
+            return "JSON"
+        case "xml":
+            return "XML"
+        case "yml", "yaml":
+            return "YAML"
+        case "swift":
+            return "Swift"
+        case "txt", "":
+            return "Plain Text"
+        case "html", "htm":
+            return "HTML"
+        case "css":
+            return "CSS"
+        case "js":
+            return "JavaScript"
+        case "ts":
+            return "TypeScript"
+        default:
+            return url.pathExtension.isEmpty ? "Plain Text" : url.pathExtension.uppercased()
+        }
+    }
+
     private func updateDocumentText(documentID: UUID, text: String) {
         guard let documentIndex = documents.firstIndex(where: { $0.id == documentID }) else { return }
 
@@ -620,6 +856,8 @@ final class WorkspaceState: ObservableObject {
         if activeDocument?.id == documentID {
             refreshSearchResults()
         }
+
+        scheduleSessionPersistence()
     }
 
     private func closeTab(_ tabID: UUID, in paneID: UUID) {
@@ -650,6 +888,14 @@ final class WorkspaceState: ObservableObject {
         if activePaneID == paneID {
             activePaneID = panes[paneIndex].id
         }
+
+        if let selectedDocument = document(for: panes[paneIndex].selectedTab) {
+            activeSelectionRange = selectedDocument.selectionRange
+        } else {
+            activeSelectionRange = NSRange(location: NSNotFound, length: 0)
+        }
+
+        scheduleSessionPersistence(immediate: true)
     }
 
     private func defaultTab(for kind: PaneKind) -> TabState {
@@ -690,6 +936,11 @@ final class WorkspaceState: ObservableObject {
         documents[documentIndex].filePath = url.path
         documents[documentIndex].title = url.lastPathComponent
         documents[documentIndex].isDirty = false
+        documents[documentIndex].metadata = Self.inferMetadata(
+            for: url,
+            text: documents[documentIndex].text,
+            encodingName: "UTF-8"
+        )
         selectedFileURL = url
 
         for paneIndex in panes.indices {
@@ -697,6 +948,8 @@ final class WorkspaceState: ObservableObject {
                 panes[paneIndex].tabs[tabIndex].title = url.lastPathComponent
             }
         }
+
+        scheduleSessionPersistence(immediate: true)
     }
 
     private func makeSessionSnapshot() -> SessionSnapshot {
@@ -717,6 +970,8 @@ final class WorkspaceState: ObservableObject {
                             documentPath: document?.filePath,
                             draftDocumentID: document?.filePath == nil ? document?.id : nil,
                             draftText: document?.filePath == nil ? document?.text : nil,
+                            draftSelectionLocation: document?.filePath == nil ? document?.selectionRange.location : nil,
+                            draftSelectionLength: document?.filePath == nil ? document?.selectionRange.length : nil,
                             kind: tab.kind
                         )
                     },
@@ -759,6 +1014,7 @@ final class WorkspaceState: ObservableObject {
             self.activePaneID = panes.first?.id
         }
 
+        activeSelectionRange = activeDocument?.selectionRange ?? NSRange(location: NSNotFound, length: 0)
         refreshSearchResults()
     }
 
@@ -792,7 +1048,11 @@ final class WorkspaceState: ObservableObject {
                         title: tabSnapshot.title,
                         filePath: nil,
                         text: tabSnapshot.draftText ?? "",
-                        isDirty: !(tabSnapshot.draftText ?? "").isEmpty
+                        isDirty: !(tabSnapshot.draftText ?? "").isEmpty,
+                        selectionRange: NSRange(
+                            location: max(tabSnapshot.draftSelectionLocation ?? 0, 0),
+                            length: max(tabSnapshot.draftSelectionLength ?? 0, 0)
+                        )
                     )
                     documents.append(document)
                     documentID = document.id
@@ -832,7 +1092,6 @@ final class WorkspaceState: ObservableObject {
         guard !query.isEmpty else {
             search.results = []
             search.selectedResultID = nil
-            activeSelectionRange = NSRange(location: NSNotFound, length: 0)
             return
         }
 
@@ -843,7 +1102,6 @@ final class WorkspaceState: ObservableObject {
         guard fullLength > 0, queryLength > 0 else {
             search.results = []
             search.selectedResultID = nil
-            activeSelectionRange = NSRange(location: NSNotFound, length: 0)
             return
         }
 
@@ -880,7 +1138,6 @@ final class WorkspaceState: ObservableObject {
             activeSelectionRange = firstResult.range
         } else {
             search.selectedResultID = nil
-            activeSelectionRange = NSRange(location: NSNotFound, length: 0)
         }
     }
 
@@ -895,6 +1152,7 @@ final class WorkspaceState: ObservableObject {
             if let tab = panes[index].tabs.first(where: { $0.documentID == documentID }) {
                 panes[index].selectedTabID = tab.id
                 activePaneID = panes[index].id
+                activeSelectionRange = document(for: tab)?.selectionRange ?? NSRange(location: NSNotFound, length: 0)
                 refreshSearchResults()
                 return
             }
@@ -912,8 +1170,42 @@ final class WorkspaceState: ObservableObject {
         panes[targetPaneIndex].tabs.append(tab)
         panes[targetPaneIndex].selectedTabID = tab.id
         activePaneID = panes[targetPaneIndex].id
-        activeSelectionRange = NSRange(location: NSNotFound, length: 0)
+        activeSelectionRange = document.selectionRange
         refreshSearchResults()
+    }
+
+    private func syncActiveSelectionRangeToDocument() {
+        guard let documentID = activeDocument?.id,
+              let documentIndex = documents.firstIndex(where: { $0.id == documentID }) else {
+            return
+        }
+
+        if NSEqualRanges(documents[documentIndex].selectionRange, activeSelectionRange) {
+            return
+        }
+
+        documents[documentIndex].selectionRange = activeSelectionRange
+        scheduleSessionPersistence()
+    }
+
+    private func scheduleSessionPersistence(immediate: Bool = false) {
+        draftAutosaveTask?.cancel()
+
+        if immediate {
+            persistSession()
+            return
+        }
+
+        draftAutosaveTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.draftAutosaveDelayNanoseconds)
+            } catch {
+                return
+            }
+
+            guard let self else { return }
+            self.persistSession()
+        }
     }
 
     private var targetTextPaneIndex: Int? {

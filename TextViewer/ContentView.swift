@@ -21,6 +21,8 @@ struct ContentView: View {
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .inactive || newPhase == .background {
                     workspace.persistSession()
+                } else if newPhase == .active {
+                    workspace.refreshActiveDocumentFromDiskIfNeeded()
                 }
             }
     }
