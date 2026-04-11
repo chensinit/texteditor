@@ -206,6 +206,8 @@ struct SearchResult: Identifiable, Hashable {
 
 struct SearchState {
     var query: String = ""
+    var replacement: String = ""
+    var isCaseSensitive: Bool = false
     var results: [SearchResult] = []
     var selectedResultID: UUID?
 }
@@ -215,8 +217,50 @@ private struct SessionSnapshot: Codable {
     var workspaceRootPath: String?
     var sidebarVisible: Bool
     var sidebarSection: SidebarSectionSnapshot
+    var searchQuery: String
+    var searchReplacement: String
+    var searchIsCaseSensitive: Bool
+    var selectedSearchResultIndex: Int?
     var panes: [PaneSnapshot]
     var activePaneID: UUID?
+
+    init(
+        layoutPreset: LayoutPreset,
+        workspaceRootPath: String?,
+        sidebarVisible: Bool,
+        sidebarSection: SidebarSectionSnapshot,
+        searchQuery: String,
+        searchReplacement: String,
+        searchIsCaseSensitive: Bool,
+        selectedSearchResultIndex: Int?,
+        panes: [PaneSnapshot],
+        activePaneID: UUID?
+    ) {
+        self.layoutPreset = layoutPreset
+        self.workspaceRootPath = workspaceRootPath
+        self.sidebarVisible = sidebarVisible
+        self.sidebarSection = sidebarSection
+        self.searchQuery = searchQuery
+        self.searchReplacement = searchReplacement
+        self.searchIsCaseSensitive = searchIsCaseSensitive
+        self.selectedSearchResultIndex = selectedSearchResultIndex
+        self.panes = panes
+        self.activePaneID = activePaneID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        layoutPreset = try container.decode(LayoutPreset.self, forKey: .layoutPreset)
+        workspaceRootPath = try container.decodeIfPresent(String.self, forKey: .workspaceRootPath)
+        sidebarVisible = try container.decode(Bool.self, forKey: .sidebarVisible)
+        sidebarSection = try container.decode(SidebarSectionSnapshot.self, forKey: .sidebarSection)
+        searchQuery = try container.decodeIfPresent(String.self, forKey: .searchQuery) ?? ""
+        searchReplacement = try container.decodeIfPresent(String.self, forKey: .searchReplacement) ?? ""
+        searchIsCaseSensitive = try container.decodeIfPresent(Bool.self, forKey: .searchIsCaseSensitive) ?? false
+        selectedSearchResultIndex = try container.decodeIfPresent(Int.self, forKey: .selectedSearchResultIndex)
+        panes = try container.decode([PaneSnapshot].self, forKey: .panes)
+        activePaneID = try container.decodeIfPresent(UUID.self, forKey: .activePaneID)
+    }
 }
 
 private enum SidebarSectionSnapshot: String, Codable {
@@ -267,7 +311,9 @@ private struct LoadedTextFile {
 @MainActor
 final class WorkspaceState: ObservableObject {
     private static let sessionDefaultsKey = "workspace.session.snapshot"
+    private static let recentFilesDefaultsKey = "workspace.recent.files"
     private static let draftAutosaveDelayNanoseconds: UInt64 = 700_000_000
+    private static let maxRecentFiles = 10
     @Published var layoutPreset: LayoutPreset = .single
     @Published var sidebar = SidebarState()
     @Published var panes: [PaneState]
@@ -276,15 +322,19 @@ final class WorkspaceState: ObservableObject {
     @Published var workspaceRootURL: URL?
     @Published var fileTree: [FileItem] = []
     @Published var selectedFileURL: URL?
+    @Published var recentFilePaths: [String]
     @Published var fileSystemError: String?
     @Published var pendingCloseConfirmation: PendingCloseState?
     @Published var search = SearchState()
+    @Published var editorFontSize: CGFloat = CodeEditorMetrics.defaultTextFontSize
+    @Published var wrapsLines = true
     @Published var activeSelectionRange = NSRange(location: NSNotFound, length: 0) {
         didSet {
             syncActiveSelectionRangeToDocument()
         }
     }
     @Published var isShowingGoToLine = false
+    @Published var searchFieldFocusToken = 0
 
     private var draftAutosaveTask: Task<Void, Never>?
 
@@ -324,6 +374,7 @@ final class WorkspaceState: ObservableObject {
         self.documents = [welcomeDocument, notesDocument]
         self.panes = [textPane, chatPane, terminalPane, scratchPane]
         self.activePaneID = textPane.id
+        self.recentFilePaths = Self.loadRecentFilePaths()
         applyLayout(.single)
     }
 
@@ -485,6 +536,24 @@ final class WorkspaceState: ObservableObject {
         refreshSearchResults()
     }
 
+    func updateSearchReplacement(_ replacement: String) {
+        search.replacement = replacement
+    }
+
+    func presentSearch() {
+        guard activeDocument != nil else { return }
+        if !sidebar.isVisible {
+            sidebar.isVisible = true
+        }
+        sidebar.selectedSection = .search
+        searchFieldFocusToken += 1
+    }
+
+    func setSearchCaseSensitivity(_ isCaseSensitive: Bool) {
+        search.isCaseSensitive = isCaseSensitive
+        refreshSearchResults()
+    }
+
     func selectSearchResult(_ resultID: UUID) {
         guard let result = search.results.first(where: { $0.id == resultID }) else { return }
         search.selectedResultID = resultID
@@ -518,7 +587,56 @@ final class WorkspaceState: ObservableObject {
     }
 
     func presentGoToLine() {
+        guard activeDocument != nil else { return }
         isShowingGoToLine = true
+    }
+
+    var canNavigateSearchResults: Bool {
+        !search.results.isEmpty
+    }
+
+    var canReplaceSearchResults: Bool {
+        activeDocument != nil && !search.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !search.results.isEmpty
+    }
+
+    func replaceCurrentSearchResult() {
+        guard canReplaceSearchResults else { return }
+        guard let document = activeDocument,
+              let result = selectedSearchResult ?? search.results.first,
+              let documentIndex = documents.firstIndex(where: { $0.id == document.id }) else {
+            return
+        }
+
+        let replacement = search.replacement
+        let updatedText = (documents[documentIndex].text as NSString).replacingCharacters(in: result.range, with: replacement)
+        let nextSearchLocation = result.range.location + (replacement as NSString).length
+
+        updateDocumentText(documentID: document.id, text: updatedText)
+        activeSelectionRange = NSRange(location: min(result.range.location, (updatedText as NSString).length), length: (replacement as NSString).length)
+        selectNearestSearchResult(after: nextSearchLocation)
+    }
+
+    func replaceAllSearchResults() {
+        guard canReplaceSearchResults else { return }
+        guard let document = activeDocument,
+              let documentIndex = documents.firstIndex(where: { $0.id == document.id }) else {
+            return
+        }
+
+        let originalText = documents[documentIndex].text
+        let mutableText = NSMutableString(string: originalText)
+        let options: NSString.CompareOptions = search.isCaseSensitive ? [] : [.caseInsensitive]
+        let replacedCount = mutableText.replaceOccurrences(
+            of: search.query,
+            with: search.replacement,
+            options: options,
+            range: NSRange(location: 0, length: mutableText.length)
+        )
+
+        guard replacedCount > 0 else { return }
+
+        updateDocumentText(documentID: document.id, text: String(mutableText))
+        activeSelectionRange = NSRange(location: min(activeSelectionRange.location, mutableText.length), length: 0)
     }
 
     func selectNextSearchResult() {
@@ -573,6 +691,7 @@ final class WorkspaceState: ObservableObject {
         guard !isDirectory(url) else { return }
 
         if let existingDocument = documents.first(where: { $0.filePath == url.path }) {
+            registerRecentFile(url)
             revealDocument(existingDocument.id)
             return
         }
@@ -588,6 +707,7 @@ final class WorkspaceState: ObservableObject {
             )
             documents.append(document)
             attachDocumentToTextPane(document)
+            registerRecentFile(url)
             fileSystemError = nil
             refreshSearchResults()
             scheduleSessionPersistence(immediate: true)
@@ -609,12 +729,28 @@ final class WorkspaceState: ObservableObject {
         document(for: activePane?.selectedTab)
     }
 
+    var recentFiles: [URL] {
+        recentFilePaths.map { URL(fileURLWithPath: $0) }
+    }
+
     var currentLineNumber: Int {
         position.line
     }
 
     var currentColumnNumber: Int {
         position.column
+    }
+
+    func increaseEditorFontSize() {
+        editorFontSize = min(editorFontSize + 1, CodeEditorMetrics.maximumTextFontSize)
+    }
+
+    func decreaseEditorFontSize() {
+        editorFontSize = max(editorFontSize - 1, CodeEditorMetrics.minimumTextFontSize)
+    }
+
+    func toggleLineWrapping() {
+        wrapsLines.toggle()
     }
 
     var selectedSearchResultIndex: Int? {
@@ -638,6 +774,21 @@ final class WorkspaceState: ObservableObject {
 
     func setFileSystemError(_ message: String?) {
         fileSystemError = message
+    }
+
+    func openRecentFile(_ url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            removeRecentFile(url)
+            fileSystemError = "Recent file is no longer available: \(url.lastPathComponent)"
+            return
+        }
+
+        openFile(url)
+    }
+
+    func clearRecentFiles() {
+        recentFilePaths = []
+        persistRecentFilePaths()
     }
 
     func refreshActiveDocumentFromDiskIfNeeded() {
@@ -942,6 +1093,7 @@ final class WorkspaceState: ObservableObject {
             encodingName: "UTF-8"
         )
         selectedFileURL = url
+        registerRecentFile(url)
 
         for paneIndex in panes.indices {
             for tabIndex in panes[paneIndex].tabs.indices where panes[paneIndex].tabs[tabIndex].documentID == documentID {
@@ -958,6 +1110,10 @@ final class WorkspaceState: ObservableObject {
             workspaceRootPath: workspaceRootURL?.path,
             sidebarVisible: sidebar.isVisible,
             sidebarSection: sidebar.selectedSection == .explorer ? .explorer : .search,
+            searchQuery: search.query,
+            searchReplacement: search.replacement,
+            searchIsCaseSensitive: search.isCaseSensitive,
+            selectedSearchResultIndex: selectedSearchResultIndex.map { $0 - 1 },
             panes: panes.map { pane in
                 PaneSnapshot(
                     id: pane.id,
@@ -986,6 +1142,10 @@ final class WorkspaceState: ObservableObject {
         layoutPreset = snapshot.layoutPreset
         sidebar.isVisible = snapshot.sidebarVisible
         sidebar.selectedSection = snapshot.sidebarSection == .explorer ? .explorer : .search
+        search.query = snapshot.searchQuery
+        search.replacement = snapshot.searchReplacement
+        search.isCaseSensitive = snapshot.searchIsCaseSensitive
+        search.selectedResultID = nil
 
         if let workspaceRootPath = snapshot.workspaceRootPath {
             let workspaceURL = URL(fileURLWithPath: workspaceRootPath)
@@ -1016,6 +1176,7 @@ final class WorkspaceState: ObservableObject {
 
         activeSelectionRange = activeDocument?.selectionRange ?? NSRange(location: NSNotFound, length: 0)
         refreshSearchResults()
+        restoreSelectedSearchResult(index: snapshot.selectedSearchResultIndex)
     }
 
     private func restorePane(from snapshot: PaneSnapshot) -> PaneState {
@@ -1109,7 +1270,8 @@ final class WorkspaceState: ObservableObject {
         var searchRange = NSRange(location: 0, length: fullLength)
 
         while true {
-            let foundRange = nsText.range(of: query, options: [.caseInsensitive], range: searchRange)
+            let compareOptions: NSString.CompareOptions = search.isCaseSensitive ? [] : [.caseInsensitive]
+            let foundRange = nsText.range(of: query, options: compareOptions, range: searchRange)
             if foundRange.location == NSNotFound {
                 break
             }
@@ -1139,6 +1301,53 @@ final class WorkspaceState: ObservableObject {
         } else {
             search.selectedResultID = nil
         }
+    }
+
+    private func restoreSelectedSearchResult(index: Int?) {
+        guard let index else { return }
+        guard search.results.indices.contains(index) else { return }
+        selectSearchResult(search.results[index].id)
+    }
+
+    private func registerRecentFile(_ url: URL) {
+        let normalizedPath = url.standardizedFileURL.path
+        recentFilePaths.removeAll { $0 == normalizedPath }
+        recentFilePaths.insert(normalizedPath, at: 0)
+        if recentFilePaths.count > Self.maxRecentFiles {
+            recentFilePaths = Array(recentFilePaths.prefix(Self.maxRecentFiles))
+        }
+        persistRecentFilePaths()
+    }
+
+    private func removeRecentFile(_ url: URL) {
+        let normalizedPath = url.standardizedFileURL.path
+        recentFilePaths.removeAll { $0 == normalizedPath }
+        persistRecentFilePaths()
+    }
+
+    private func persistRecentFilePaths() {
+        UserDefaults.standard.set(recentFilePaths, forKey: Self.recentFilesDefaultsKey)
+    }
+
+    private static func loadRecentFilePaths() -> [String] {
+        let storedPaths = UserDefaults.standard.stringArray(forKey: recentFilesDefaultsKey) ?? []
+        return storedPaths.filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    private var selectedSearchResult: SearchResult? {
+        guard let selectedResultID = search.selectedResultID else { return nil }
+        return search.results.first(where: { $0.id == selectedResultID })
+    }
+
+    private func selectNearestSearchResult(after location: Int) {
+        guard !search.results.isEmpty else { return }
+
+        if let result = search.results.first(where: { $0.range.location >= location }) {
+            selectSearchResult(result.id)
+            return
+        }
+
+        selectSearchResult(search.results[0].id)
     }
 
     private var position: (line: Int, column: Int) {

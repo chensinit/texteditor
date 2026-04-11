@@ -14,6 +14,11 @@ final class CodeEditorContainerView: NSView {
 
     var onTextChange: ((String, NSRange) -> Void)?
     var onSelectionChange: ((NSRange) -> Void)?
+    var onOpenDroppedURL: ((URL) -> Void)? {
+        didSet {
+            textView.onOpenDroppedURL = onOpenDroppedURL
+        }
+    }
     private var pendingSelectionRange: NSRange?
 
     override init(frame frameRect: NSRect) {
@@ -56,15 +61,25 @@ final class CodeEditorContainerView: NSView {
         applyPendingSelectionIfNeeded()
     }
 
-    func update(text: String, selectedRange: NSRange, currentLineNumber: Int) {
+    func update(text: String, selectedRange: NSRange, currentLineNumber: Int, fontSize: CGFloat, wrapsLines: Bool) {
         let isFocused = window?.firstResponder === textView
         let isComposing = textView.hasMarkedText()
         let shouldRestoreSelection = !isFocused && !isComposing
+
+        if textView.font?.pointSize != fontSize {
+            textView.font = CodeEditorMetrics.textFont(size: fontSize)
+        }
+        gutterView.fontSize = fontSize
+        applyWrapMode(wrapsLines)
 
         if textView.string != text && !isFocused && !isComposing {
             textView.string = text
             textView.needsDisplay = true
         }
+
+        configureTextContainerForCurrentWrapMode()
+        updateTextViewDocumentSize()
+        clampScrollOriginToDocumentBounds()
 
         if
             shouldRestoreSelection,
@@ -76,17 +91,30 @@ final class CodeEditorContainerView: NSView {
             applyPendingSelectionIfNeeded()
         }
 
-        textView.textContainer?.containerSize = NSSize(
-            width: scrollView.contentSize.width,
-            height: CGFloat.greatestFiniteMagnitude
-        )
-        updateTextViewDocumentSize()
-        clampScrollOriginToDocumentBounds()
-
         gutterView.currentLineNumber = currentLineNumber
         syncGutterScrollOffset()
         textView.needsDisplay = true
         gutterView.needsDisplay = true
+    }
+
+    func update(
+        text: String,
+        selectedRange: NSRange,
+        currentLineNumber: Int,
+        fontSize: CGFloat,
+        wrapsLines: Bool,
+        searchRanges: [NSRange],
+        selectedSearchRange: NSRange?
+    ) {
+        textView.searchRanges = searchRanges
+        textView.selectedSearchRange = selectedSearchRange
+        update(
+            text: text,
+            selectedRange: selectedRange,
+            currentLineNumber: currentLineNumber,
+            fontSize: fontSize,
+            wrapsLines: wrapsLines
+        )
     }
 
     @objc
@@ -141,7 +169,7 @@ final class CodeEditorContainerView: NSView {
         textView.backgroundColor = CodeEditorMetrics.editorBackgroundColor
         textView.textColor = CodeEditorMetrics.textColor
         textView.insertionPointColor = .white
-        textView.font = CodeEditorMetrics.textFont
+        textView.font = CodeEditorMetrics.textFont(size: CodeEditorMetrics.defaultTextFontSize)
         textView.allowsUndo = true
         textView.textContainerInset = NSSize(
             width: CodeEditorMetrics.horizontalInset,
@@ -157,6 +185,7 @@ final class CodeEditorContainerView: NSView {
         textView.onNeedsCurrentLineRefresh = { [weak self] in
             self?.gutterView.needsDisplay = true
         }
+        textView.onOpenDroppedURL = onOpenDroppedURL
     }
 
     private func configureGutterView() {
@@ -197,6 +226,27 @@ final class CodeEditorContainerView: NSView {
         gutterView.setBoundsOrigin(NSPoint(x: 0, y: visibleBounds.origin.y))
     }
 
+    private func applyWrapMode(_ wrapsLines: Bool) {
+        let shouldTrackWidth = wrapsLines
+        if textView.isHorizontallyResizable == !wrapsLines,
+           textView.autoresizingMask == (wrapsLines ? [.width] : []) {
+            return
+        }
+
+        textView.isHorizontallyResizable = !wrapsLines
+        textView.autoresizingMask = wrapsLines ? [.width] : []
+        textView.textContainer?.widthTracksTextView = shouldTrackWidth
+        scrollView.hasHorizontalScroller = !wrapsLines
+    }
+
+    private func configureTextContainerForCurrentWrapMode() {
+        guard let textContainer = textView.textContainer else { return }
+
+        let wrapsLines = textContainer.widthTracksTextView
+        let containerWidth = wrapsLines ? scrollView.contentSize.width : CGFloat.greatestFiniteMagnitude
+        textContainer.containerSize = NSSize(width: containerWidth, height: CGFloat.greatestFiniteMagnitude)
+    }
+
     private func updateTextViewDocumentSize() {
         guard
             let layoutManager = textView.layoutManager,
@@ -207,12 +257,14 @@ final class CodeEditorContainerView: NSView {
 
         layoutManager.ensureLayout(for: textContainer)
         let usedRect = layoutManager.usedRect(for: textContainer)
+        let contentWidth = textContainer.widthTracksTextView ? scrollView.contentSize.width : ceil(usedRect.maxX + (textView.textContainerInset.width * 2))
         let contentHeight = ceil(usedRect.maxY + (textView.textContainerInset.height * 2))
         let targetHeight = max(contentHeight, scrollView.contentSize.height)
+        let targetWidth = max(contentWidth, scrollView.contentSize.width)
         textView.frame = NSRect(
             x: 0,
             y: 0,
-            width: scrollView.contentSize.width,
+            width: targetWidth,
             height: targetHeight
         )
     }
@@ -239,11 +291,37 @@ final class CodeEditorContainerView: NSView {
 
 final class CodeEditorTextView: NSTextView {
     var onNeedsCurrentLineRefresh: (() -> Void)?
+    var onOpenDroppedURL: ((URL) -> Void)?
+    var searchRanges: [NSRange] = []
+    var selectedSearchRange: NSRange?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if droppedFileURL(from: sender) != nil {
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if droppedFileURL(from: sender) != nil {
+            return true
+        }
+        return super.prepareForDragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if let url = droppedFileURL(from: sender) {
+            onOpenDroppedURL?(url)
+            return true
+        }
+        return super.performDragOperation(sender)
+    }
 
     override func drawBackground(in rect: NSRect) {
         CodeEditorMetrics.editorBackgroundColor.setFill()
         rect.fill()
 
+        drawSearchHighlights()
         drawCurrentLineHighlight()
     }
 
@@ -275,6 +353,52 @@ final class CodeEditorTextView: NSTextView {
 
             CodeEditorMetrics.currentLineFillColor.setFill()
             NSBezierPath(roundedRect: highlightRect, xRadius: 4, yRadius: 4).fill()
+        }
+    }
+
+    private func droppedFileURL(from draggingInfo: NSDraggingInfo) -> URL? {
+        let classes: [AnyClass] = [NSURL.self]
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true
+        ]
+        return draggingInfo.draggingPasteboard
+            .readObjects(forClasses: classes, options: options)?
+            .compactMap { $0 as? URL }
+            .first
+    }
+
+    private func drawSearchHighlights() {
+        guard
+            let layoutManager,
+            let textContainer,
+            !searchRanges.isEmpty
+        else {
+            return
+        }
+
+        for range in searchRanges {
+            guard range.location != NSNotFound, range.length > 0 else { continue }
+
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            layoutManager.enumerateEnclosingRects(
+                forGlyphRange: glyphRange,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: textContainer
+            ) { rect, _ in
+                let drawRect = NSRect(
+                    x: rect.minX,
+                    y: rect.minY + self.textContainerInset.height,
+                    width: rect.width,
+                    height: rect.height
+                )
+
+                let isSelectedResult = self.selectedSearchRange.map { NSEqualRanges($0, range) } ?? false
+                let color = isSelectedResult
+                    ? CodeEditorMetrics.selectedSearchHighlightColor
+                    : CodeEditorMetrics.searchHighlightColor
+                color.setFill()
+                NSBezierPath(roundedRect: drawRect, xRadius: 3, yRadius: 3).fill()
+            }
         }
     }
 

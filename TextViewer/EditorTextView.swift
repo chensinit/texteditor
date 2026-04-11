@@ -49,7 +49,7 @@ struct EditorTextView: NSViewRepresentable {
         textView.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
         textView.textColor = NSColor(calibratedWhite: 0.95, alpha: 1)
         textView.insertionPointColor = .white
-        textView.font = EditorLayoutMetrics.textFont
+        textView.font = EditorLayoutMetrics.textFont(size: EditorLayoutMetrics.defaultTextFontSize)
         textView.allowsUndo = true
 
         if let textContainer = textView.textContainer {

@@ -7,6 +7,7 @@
 
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct EditorShellView: View {
     @EnvironmentObject private var workspace: WorkspaceState
@@ -81,96 +82,141 @@ private struct TopToolbarView: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Button {
-                workspace.createNewDocument()
-            } label: {
-                Label("New", systemImage: "plus")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    toolbarGroup {
+                        toolbarButton("plus", title: "New") {
+                            workspace.createNewDocument()
+                        }
+                        toolbarButton("doc.badge.plus", title: "Open File") {
+                            openDocumentFile()
+                        }
+                        toolbarButton("square.and.arrow.down", title: "Save", isDisabled: workspace.activeDocument == nil) {
+                            saveDocument()
+                        }
+                        Menu {
+                            Button("Open Folder") {
+                                openWorkspaceFolder()
+                            }
+
+                            Divider()
+
+                            if workspace.recentFiles.isEmpty {
+                                Text("No Recent Files")
+                            } else {
+                                ForEach(workspace.recentFiles, id: \.path) { url in
+                                    Button {
+                                        workspace.openRecentFile(url)
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(url.lastPathComponent)
+                                            Text(url.deletingLastPathComponent().path)
+                                                .font(.system(size: 11))
+                                        }
+                                    }
+                                }
+
+                                Divider()
+
+                                Button("Clear Recent Files") {
+                                    workspace.clearRecentFiles()
+                                }
+                            }
+                        } label: {
+                            toolbarMenuLabel("folder", title: "Files")
+                        }
+                    }
+
+                    toolbarGroup {
+                        toolbarButton("arrow.uturn.backward", title: "Undo") {
+                            sendAction(#selector(UndoManager.undo))
+                        }
+                        toolbarButton("arrow.uturn.forward", title: "Redo") {
+                            sendAction(#selector(UndoManager.redo))
+                        }
+                        Menu {
+                            Button("Cut") {
+                                sendAction(#selector(NSText.cut(_:)))
+                            }
+                            Button("Copy") {
+                                sendAction(#selector(NSText.copy(_:)))
+                            }
+                            Button("Paste") {
+                                sendAction(#selector(NSText.paste(_:)))
+                            }
+                        } label: {
+                            toolbarMenuLabel("scissors", title: "Edit")
+                        }
+                    }
+
+                    toolbarGroup {
+                        toolbarButton("magnifyingglass", title: "Find", isDisabled: workspace.activeDocument == nil) {
+                            workspace.presentSearch()
+                        }
+                        toolbarButton("text.line.first.and.arrowtriangle.forward", title: "Go To Line", isDisabled: workspace.activeDocument == nil) {
+                            workspace.presentGoToLine()
+                        }
+                        Menu {
+                            Button("Font Smaller") {
+                                workspace.decreaseEditorFontSize()
+                            }
+                            .disabled(workspace.activeDocument == nil)
+
+                            Button("Font Larger") {
+                                workspace.increaseEditorFontSize()
+                            }
+                            .disabled(workspace.activeDocument == nil)
+
+                            Divider()
+
+                            Button(workspace.wrapsLines ? "Disable Wrap" : "Enable Wrap") {
+                                workspace.toggleLineWrapping()
+                            }
+                            .disabled(workspace.activeDocument == nil)
+                        } label: {
+                            toolbarMenuLabel("textformat", title: "View")
+                        }
+                    }
+
+                    toolbarGroup {
+                        toolbarButton("sidebar.left", title: "Sidebar") {
+                            workspace.toggleSidebar()
+                        }
+
+                        Toggle(isOn: Binding(
+                            get: { workspace.wrapsLines },
+                            set: { _ in workspace.toggleLineWrapping() }
+                        )) {
+                            Image(systemName: workspace.wrapsLines ? "text.alignleft" : "arrow.left.and.right.text.vertical")
+                        }
+                        .toggleStyle(.button)
+                        .help(workspace.wrapsLines ? "Disable Wrap" : "Enable Wrap")
+                        .disabled(workspace.activeDocument == nil)
+
+                        HStack(spacing: 4) {
+                            toolbarButton("textformat.size.smaller", title: "Font Smaller", isDisabled: workspace.activeDocument == nil) {
+                                workspace.decreaseEditorFontSize()
+                            }
+                            toolbarButton("textformat.size.larger", title: "Font Larger", isDisabled: workspace.activeDocument == nil) {
+                                workspace.increaseEditorFontSize()
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
             }
-            .buttonStyle(.borderless)
 
-            Button {
-                openWorkspaceFolder()
-            } label: {
-                Label("Open Folder", systemImage: "folder.badge.plus")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(workspace.activeDocument?.title ?? "No File")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                Text(workspace.workspaceTitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .buttonStyle(.borderless)
-
-            Button {
-                openDocumentFile()
-            } label: {
-                Label("Open File", systemImage: "doc.badge.plus")
-            }
-            .buttonStyle(.borderless)
-
-            Button {
-                saveDocument()
-            } label: {
-                Label("Save", systemImage: "square.and.arrow.down")
-            }
-            .buttonStyle(.borderless)
-            .disabled(workspace.activeDocument == nil)
-
-            Button {
-                saveDocumentAs()
-            } label: {
-                Label("Save As", systemImage: "square.and.arrow.down.on.square")
-            }
-            .buttonStyle(.borderless)
-            .disabled(workspace.activeDocument == nil)
-
-            Button {
-                workspace.toggleSidebar()
-            } label: {
-                Label("Sidebar", systemImage: "sidebar.left")
-            }
-            .buttonStyle(.borderless)
-
-            Divider().frame(height: 20)
-
-            Button {
-                sendAction(#selector(UndoManager.undo))
-            } label: {
-                Label("Undo", systemImage: "arrow.uturn.backward")
-            }
-            .buttonStyle(.borderless)
-
-            Button {
-                sendAction(#selector(UndoManager.redo))
-            } label: {
-                Label("Redo", systemImage: "arrow.uturn.forward")
-            }
-            .buttonStyle(.borderless)
-
-            Button {
-                sendAction(#selector(NSText.cut(_:)))
-            } label: {
-                Label("Cut", systemImage: "scissors")
-            }
-            .buttonStyle(.borderless)
-
-            Button {
-                sendAction(#selector(NSText.copy(_:)))
-            } label: {
-                Label("Copy", systemImage: "doc.on.doc")
-            }
-            .buttonStyle(.borderless)
-
-            Button {
-                sendAction(#selector(NSText.paste(_:)))
-            } label: {
-                Label("Paste", systemImage: "clipboard")
-            }
-            .buttonStyle(.borderless)
-
-            Button {
-                workspace.presentGoToLine()
-            } label: {
-                Label("Go To Line", systemImage: "text.line.first.and.arrowtriangle.forward")
-            }
-            .buttonStyle(.borderless)
-            .disabled(workspace.activeDocument == nil)
-
-            Divider().frame(height: 20)
+            .frame(width: 170, alignment: .leading)
 
             Picker("Layout", selection: Binding(
                 get: { workspace.layoutPreset },
@@ -181,9 +227,7 @@ private struct TopToolbarView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 320)
-
-            Spacer()
+            .frame(width: 250)
 
             if let activePane = workspace.activePane {
                 Picker("Pane Type", selection: Binding(
@@ -195,12 +239,65 @@ private struct TopToolbarView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 360)
+                .frame(width: 250)
             }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)
         .background(Color.black.opacity(0.32))
+    }
+
+    @ViewBuilder
+    private func toolbarGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 6, content: content)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.white.opacity(0.045))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+            )
+    }
+
+    private func toolbarButton(_ systemImage: String, title: String, isDisabled: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isDisabled ? Color.secondary.opacity(0.6) : Color.white.opacity(0.9))
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 9))
+        .help(title)
+        .disabled(isDisabled)
+    }
+
+    private func toolbarMenuLabel(_ systemImage: String, title: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 13, weight: .semibold))
+            .frame(width: 28, height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Color.white.opacity(0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            )
+            .foregroundStyle(.white.opacity(0.9))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .help(title)
     }
 
     private func openWorkspaceFolder() {
@@ -418,20 +515,35 @@ private struct SidebarSearchPlaceholderView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
 
-            TextField(
-                "Search current document",
+            SearchFieldView(
                 text: Binding(
                     get: { workspace.search.query },
                     set: { workspace.updateSearchQuery($0) }
-                )
+                ),
+                focusToken: workspace.searchFieldFocusToken,
+                onSubmit: {
+                    workspace.selectNextSearchResult()
+                },
+                onShiftSubmit: {
+                    workspace.selectPreviousSearchResult()
+                }
             )
-            .textFieldStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.white.opacity(0.05))
+            .frame(height: 42)
+
+            SearchFieldView(
+                text: Binding(
+                    get: { workspace.search.replacement },
+                    set: { workspace.updateSearchReplacement($0) }
+                ),
+                focusToken: nil,
+                onSubmit: {
+                    workspace.replaceCurrentSearchResult()
+                },
+                onShiftSubmit: {
+                    workspace.replaceAllSearchResults()
+                }
             )
+            .frame(height: 42)
 
             HStack {
                 Text(workspace.activeDocument?.title ?? "No active document")
@@ -459,6 +571,31 @@ private struct SidebarSearchPlaceholderView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(workspace.search.results.isEmpty)
+
+                Toggle(isOn: Binding(
+                    get: { workspace.search.isCaseSensitive },
+                    set: { workspace.setSearchCaseSensitivity($0) }
+                )) {
+                    Text("Match Case")
+                }
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11, weight: .medium))
+            }
+
+            HStack(spacing: 8) {
+                Button("Replace Next") {
+                    workspace.replaceCurrentSearchResult()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!workspace.canReplaceSearchResults)
+
+                Button("Replace All") {
+                    workspace.replaceAllSearchResults()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!workspace.canReplaceSearchResults)
             }
 
             if workspace.search.query.isEmpty {
@@ -515,6 +652,78 @@ private struct SidebarSearchPlaceholderView: View {
             return "\(current) / \(workspace.search.results.count)"
         }
         return "\(workspace.search.results.count) results"
+    }
+}
+
+private struct SearchFieldView: NSViewRepresentable {
+    @Binding var text: String
+    let focusToken: Int?
+    let onSubmit: () -> Void
+    let onShiftSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onSubmit: onSubmit, onShiftSubmit: onShiftSubmit)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = NSTextField(frame: .zero)
+        textField.delegate = context.coordinator
+        textField.font = .systemFont(ofSize: 13)
+        textField.isBordered = false
+        textField.isBezeled = false
+        textField.focusRingType = .none
+        textField.drawsBackground = true
+        textField.backgroundColor = NSColor.white.withAlphaComponent(0.05)
+        textField.textColor = .white
+        textField.placeholderString = focusToken == nil ? "Replace with" : "Search current document"
+
+        return textField
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+
+        if let focusToken, context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            DispatchQueue.main.async {
+                guard let window = nsView.window else { return }
+                window.makeFirstResponder(nsView)
+                nsView.currentEditor()?.selectAll(nil)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding private var text: String
+        private let onSubmit: () -> Void
+        private let onShiftSubmit: () -> Void
+        var lastFocusToken: Int = 0
+
+        init(text: Binding<String>, onSubmit: @escaping () -> Void, onShiftSubmit: @escaping () -> Void) {
+            self._text = text
+            self.onSubmit = onSubmit
+            self.onShiftSubmit = onShiftSubmit
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let textField = obj.object as? NSTextField else { return }
+            text = textField.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                    onShiftSubmit()
+                } else {
+                    onSubmit()
+                }
+                return true
+            }
+
+            return false
+        }
     }
 }
 
@@ -652,6 +861,7 @@ private struct WorkspaceTabStripView: View {
 
 private struct WorkspaceAreaView: View {
     @EnvironmentObject private var workspace: WorkspaceState
+    @State private var isDropTargeted = false
 
     private let singleColumn = [GridItem(.flexible())]
     private let twoColumns = [GridItem(.flexible()), GridItem(.flexible())]
@@ -679,7 +889,29 @@ private struct WorkspaceAreaView: View {
                 }
                 .padding(12)
             }
+
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(Color.accentColor.opacity(0.9), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18)
+                            .fill(Color.accentColor.opacity(0.08))
+                            .padding(12)
+                    )
+                    .overlay {
+                        VStack(spacing: 8) {
+                            Image(systemName: "doc.badge.plus")
+                                .font(.system(size: 26, weight: .semibold))
+                            Text("Drop a file or folder to open")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(.white.opacity(0.95))
+                    }
+                    .allowsHitTesting(false)
+            }
         }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted, perform: handleDrop)
     }
 
     private var columns: [GridItem] {
@@ -698,6 +930,32 @@ private struct WorkspaceAreaView: View {
         case .threeColumns, .quad:
             280
         }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        let fileURLType = UTType.fileURL.identifier
+        var handled = false
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(fileURLType) {
+            provider.loadDataRepresentation(forTypeIdentifier: fileURLType) { data, _ in
+                guard let data,
+                      let url = URL(dataRepresentation: data, relativeTo: nil) else {
+                    return
+                }
+
+                DispatchQueue.main.async {
+                    let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey])
+                    if resourceValues?.isDirectory == true {
+                        workspace.openWorkspace(at: url)
+                    } else {
+                        workspace.openFile(url)
+                    }
+                }
+            }
+            handled = true
+        }
+
+        return handled
     }
 }
 
@@ -790,6 +1048,18 @@ private struct TextPaneView: View {
                     CodeEditorView(
                         documentID: document.id,
                         currentLineNumber: workspace.currentLineNumber,
+                        fontSize: workspace.editorFontSize,
+                        wrapsLines: workspace.wrapsLines,
+                        searchRanges: workspace.search.results.map(\.range),
+                        selectedSearchRange: workspace.search.results.first(where: { $0.id == workspace.search.selectedResultID })?.range,
+                        onOpenDroppedURL: { url in
+                            let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey])
+                            if resourceValues?.isDirectory == true {
+                                workspace.openWorkspace(at: url)
+                            } else {
+                                workspace.openFile(url)
+                            }
+                        },
                         text: textBinding,
                         selectedRange: $workspace.activeSelectionRange
                     )
@@ -1048,8 +1318,8 @@ private struct StatusBarView: View {
 
     private var searchSummary: String {
         if let current = workspace.selectedSearchResultIndex {
-            return "Find \(current)/\(workspace.search.results.count)"
+            return "Find \(current)/\(workspace.search.results.count)\(workspace.search.isCaseSensitive ? " Aa" : "")"
         }
-        return "Find 0/\(workspace.search.results.count)"
+        return "Find 0/\(workspace.search.results.count)\(workspace.search.isCaseSensitive ? " Aa" : "")"
     }
 }

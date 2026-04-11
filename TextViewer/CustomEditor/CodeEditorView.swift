@@ -11,6 +11,11 @@ import SwiftUI
 struct CodeEditorView: NSViewRepresentable {
     let documentID: UUID
     let currentLineNumber: Int
+    let fontSize: CGFloat
+    let wrapsLines: Bool
+    let searchRanges: [NSRange]
+    let selectedSearchRange: NSRange?
+    let onOpenDroppedURL: (URL) -> Void
     @Binding var text: String
     @Binding var selectedRange: NSRange
 
@@ -26,7 +31,16 @@ struct CodeEditorView: NSViewRepresentable {
         view.onSelectionChange = { updatedRange in
             context.coordinator.handleSelectionChange(updatedRange)
         }
-        view.update(text: text, selectedRange: selectedRange, currentLineNumber: currentLineNumber)
+        view.onOpenDroppedURL = onOpenDroppedURL
+        view.update(
+            text: text,
+            selectedRange: selectedRange,
+            currentLineNumber: currentLineNumber,
+            fontSize: fontSize,
+            wrapsLines: wrapsLines,
+            searchRanges: searchRanges,
+            selectedSearchRange: selectedSearchRange
+        )
         return view
     }
 
@@ -37,7 +51,16 @@ struct CodeEditorView: NSViewRepresentable {
         nsView.onSelectionChange = { updatedRange in
             context.coordinator.handleSelectionChange(updatedRange)
         }
-        nsView.update(text: text, selectedRange: selectedRange, currentLineNumber: currentLineNumber)
+        nsView.onOpenDroppedURL = onOpenDroppedURL
+        nsView.update(
+            text: text,
+            selectedRange: selectedRange,
+            currentLineNumber: currentLineNumber,
+            fontSize: fontSize,
+            wrapsLines: wrapsLines,
+            searchRanges: searchRanges,
+            selectedSearchRange: selectedSearchRange
+        )
     }
 
     final class Coordinator: NSObject {

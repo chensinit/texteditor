@@ -8,6 +8,14 @@
 import AppKit
 
 final class CodeEditorGutterView: NSView {
+    var fontSize: CGFloat = CodeEditorMetrics.defaultTextFontSize {
+        didSet {
+            if oldValue != fontSize {
+                needsDisplay = true
+            }
+        }
+    }
+
     weak var textView: NSTextView? {
         didSet {
             needsDisplay = true
@@ -95,7 +103,7 @@ final class CodeEditorGutterView: NSView {
             paragraphStyle.alignment = .right
 
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: CodeEditorMetrics.lineNumberFont,
+                .font: CodeEditorMetrics.lineNumberFont(size: fontSize),
                 .foregroundColor: lineNumber == currentLineNumber
                     ? CodeEditorMetrics.currentLineNumberColor
                     : CodeEditorMetrics.lineNumberColor,
@@ -104,7 +112,7 @@ final class CodeEditorGutterView: NSView {
 
             let attributedString = NSAttributedString(string: "\(lineNumber)", attributes: attributes)
             attributedString.draw(
-                in: drawRect.offsetBy(dx: 0, dy: max((drawRect.height - CodeEditorMetrics.lineHeight) / 2, 0))
+                in: drawRect.offsetBy(dx: 0, dy: max((drawRect.height - CodeEditorMetrics.lineHeight(for: fontSize)) / 2, 0))
             )
         }
     }

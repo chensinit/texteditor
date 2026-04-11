@@ -14,6 +14,7 @@ struct ContentView: View {
     var body: some View {
         EditorShellView()
             .environmentObject(workspace)
+            .focusedSceneObject(workspace)
             .frame(minWidth: 1100, minHeight: 720)
             .task {
                 workspace.restoreSessionIfPossible()
