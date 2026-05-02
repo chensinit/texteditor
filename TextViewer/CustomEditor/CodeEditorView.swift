@@ -13,9 +13,12 @@ struct CodeEditorView: NSViewRepresentable {
     let currentLineNumber: Int
     let fontSize: CGFloat
     let wrapsLines: Bool
+    let highlightsCurrentLine: Bool
+    let showsInvisibleCharacters: Bool
     let searchRanges: [NSRange]
     let selectedSearchRange: NSRange?
     let onOpenDroppedURL: (URL) -> Void
+    let onViewportChange: (Int, Int, Int) -> Void
     @Binding var text: String
     @Binding var selectedRange: NSRange
 
@@ -31,6 +34,7 @@ struct CodeEditorView: NSViewRepresentable {
         view.onSelectionChange = { updatedRange in
             context.coordinator.handleSelectionChange(updatedRange)
         }
+        view.onViewportChange = onViewportChange
         view.onOpenDroppedURL = onOpenDroppedURL
         view.update(
             text: text,
@@ -38,6 +42,8 @@ struct CodeEditorView: NSViewRepresentable {
             currentLineNumber: currentLineNumber,
             fontSize: fontSize,
             wrapsLines: wrapsLines,
+            highlightsCurrentLine: highlightsCurrentLine,
+            showsInvisibleCharacters: showsInvisibleCharacters,
             searchRanges: searchRanges,
             selectedSearchRange: selectedSearchRange
         )
@@ -51,6 +57,7 @@ struct CodeEditorView: NSViewRepresentable {
         nsView.onSelectionChange = { updatedRange in
             context.coordinator.handleSelectionChange(updatedRange)
         }
+        nsView.onViewportChange = onViewportChange
         nsView.onOpenDroppedURL = onOpenDroppedURL
         nsView.update(
             text: text,
@@ -58,6 +65,8 @@ struct CodeEditorView: NSViewRepresentable {
             currentLineNumber: currentLineNumber,
             fontSize: fontSize,
             wrapsLines: wrapsLines,
+            highlightsCurrentLine: highlightsCurrentLine,
+            showsInvisibleCharacters: showsInvisibleCharacters,
             searchRanges: searchRanges,
             selectedSearchRange: selectedSearchRange
         )

@@ -38,4 +38,5 @@ enum CodeEditorMetrics {
     static let currentLineFillColor = NSColor.white.withAlphaComponent(0.035)
     static let searchHighlightColor = NSColor.systemYellow.withAlphaComponent(0.22)
     static let selectedSearchHighlightColor = NSColor.systemOrange.withAlphaComponent(0.32)
+    static let invisibleCharacterColor = NSColor(calibratedWhite: 1.0, alpha: 0.18)
 }

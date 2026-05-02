@@ -97,6 +97,7 @@ struct DocumentMetadata: Hashable {
     var encodingName: String
     var lineEnding: LineEndingKind
     var isReadOnly: Bool
+    var isPartialPreview: Bool
     var kindName: String
     var lastKnownModificationDate: Date?
 
@@ -104,6 +105,7 @@ struct DocumentMetadata: Hashable {
         encodingName: "UTF-8",
         lineEnding: .none,
         isReadOnly: false,
+        isPartialPreview: false,
         kindName: "Plain Text",
         lastKnownModificationDate: nil
     )
@@ -212,6 +214,12 @@ struct SearchState {
     var selectedResultID: UUID?
 }
 
+struct EditorViewportState: Equatable {
+    var topLine: Int = 1
+    var visibleLineCount: Int = 1
+    var totalLineCount: Int = 1
+}
+
 private struct SessionSnapshot: Codable {
     var layoutPreset: LayoutPreset
     var workspaceRootPath: String?
@@ -220,6 +228,10 @@ private struct SessionSnapshot: Codable {
     var searchQuery: String
     var searchReplacement: String
     var searchIsCaseSensitive: Bool
+    var editorFontSize: Double
+    var wrapsLines: Bool
+    var highlightsCurrentLine: Bool
+    var showsInvisibleCharacters: Bool
     var selectedSearchResultIndex: Int?
     var panes: [PaneSnapshot]
     var activePaneID: UUID?
@@ -232,6 +244,10 @@ private struct SessionSnapshot: Codable {
         searchQuery: String,
         searchReplacement: String,
         searchIsCaseSensitive: Bool,
+        editorFontSize: Double,
+        wrapsLines: Bool,
+        highlightsCurrentLine: Bool,
+        showsInvisibleCharacters: Bool,
         selectedSearchResultIndex: Int?,
         panes: [PaneSnapshot],
         activePaneID: UUID?
@@ -243,6 +259,10 @@ private struct SessionSnapshot: Codable {
         self.searchQuery = searchQuery
         self.searchReplacement = searchReplacement
         self.searchIsCaseSensitive = searchIsCaseSensitive
+        self.editorFontSize = editorFontSize
+        self.wrapsLines = wrapsLines
+        self.highlightsCurrentLine = highlightsCurrentLine
+        self.showsInvisibleCharacters = showsInvisibleCharacters
         self.selectedSearchResultIndex = selectedSearchResultIndex
         self.panes = panes
         self.activePaneID = activePaneID
@@ -257,6 +277,10 @@ private struct SessionSnapshot: Codable {
         searchQuery = try container.decodeIfPresent(String.self, forKey: .searchQuery) ?? ""
         searchReplacement = try container.decodeIfPresent(String.self, forKey: .searchReplacement) ?? ""
         searchIsCaseSensitive = try container.decodeIfPresent(Bool.self, forKey: .searchIsCaseSensitive) ?? false
+        editorFontSize = try container.decodeIfPresent(Double.self, forKey: .editorFontSize) ?? Double(CodeEditorMetrics.defaultTextFontSize)
+        wrapsLines = try container.decodeIfPresent(Bool.self, forKey: .wrapsLines) ?? true
+        highlightsCurrentLine = try container.decodeIfPresent(Bool.self, forKey: .highlightsCurrentLine) ?? true
+        showsInvisibleCharacters = try container.decodeIfPresent(Bool.self, forKey: .showsInvisibleCharacters) ?? false
         selectedSearchResultIndex = try container.decodeIfPresent(Int.self, forKey: .selectedSearchResultIndex)
         panes = try container.decode([PaneSnapshot].self, forKey: .panes)
         activePaneID = try container.decodeIfPresent(UUID.self, forKey: .activePaneID)
@@ -288,15 +312,15 @@ private struct TabSnapshot: Codable {
 
 private enum FileOpenError: LocalizedError {
     case unreadable
-    case binaryContent
+    case cannotOverwritePartialPreview
     case unsupportedEncoding
 
     var errorDescription: String? {
         switch self {
         case .unreadable:
             return "The file could not be read."
-        case .binaryContent:
-            return "The selected file looks like binary data, so it was not opened as text."
+        case .cannotOverwritePartialPreview:
+            return "This tab is a partial preview. Use Save As to write it to a different file."
         case .unsupportedEncoding:
             return "The file encoding is not supported yet."
         }
@@ -306,6 +330,17 @@ private enum FileOpenError: LocalizedError {
 private struct LoadedTextFile {
     var text: String
     var metadata: DocumentMetadata
+}
+
+private let filePreviewByteLimit = 10_240
+private let binaryPreviewByteLimit = 512
+
+struct ExternalFileChangeState: Identifiable {
+    let id = UUID()
+    let documentID: UUID
+    let documentTitle: String
+    let filePath: String
+    let modificationDate: Date
 }
 
 @MainActor
@@ -325,9 +360,14 @@ final class WorkspaceState: ObservableObject {
     @Published var recentFilePaths: [String]
     @Published var fileSystemError: String?
     @Published var pendingCloseConfirmation: PendingCloseState?
+    @Published var pendingExternalFileChange: ExternalFileChangeState?
+    @Published var externalConflictDocumentIDs: Set<UUID> = []
     @Published var search = SearchState()
     @Published var editorFontSize: CGFloat = CodeEditorMetrics.defaultTextFontSize
     @Published var wrapsLines = true
+    @Published var highlightsCurrentLine = true
+    @Published var showsInvisibleCharacters = false
+    @Published var editorViewport = EditorViewportState()
     @Published var activeSelectionRange = NSRange(location: NSNotFound, length: 0) {
         didSet {
             syncActiveSelectionRangeToDocument()
@@ -429,6 +469,7 @@ final class WorkspaceState: ObservableObject {
         activePaneID = paneID
         refreshActiveDocumentFromDiskIfNeeded()
         refreshSearchResults()
+        refreshEditorViewport()
     }
 
     func cycleSidebarSection() {
@@ -487,6 +528,7 @@ final class WorkspaceState: ObservableObject {
         }
         refreshActiveDocumentFromDiskIfNeeded()
         refreshSearchResults()
+        refreshEditorViewport()
     }
 
     func requestCloseTab(_ tabID: UUID, in paneID: UUID) {
@@ -586,6 +628,16 @@ final class WorkspaceState: ObservableObject {
         activeSelectionRange = NSRange(location: safeLocation, length: 0)
     }
 
+    func updateEditorViewport(topLine: Int, visibleLineCount: Int, totalLineCount: Int) {
+        let nextViewport = EditorViewportState(
+            topLine: max(topLine, 1),
+            visibleLineCount: max(visibleLineCount, 1),
+            totalLineCount: max(totalLineCount, 1)
+        )
+        guard nextViewport != editorViewport else { return }
+        editorViewport = nextViewport
+    }
+
     func presentGoToLine() {
         guard activeDocument != nil else { return }
         isShowingGoToLine = true
@@ -671,7 +723,7 @@ final class WorkspaceState: ObservableObject {
         selectedFileURL = nil
 
         do {
-            fileTree = try Self.loadDirectoryItems(at: url)
+            fileTree = try Self.loadDirectoryItems(at: url, recursively: false)
             fileSystemError = nil
         } catch {
             fileTree = []
@@ -685,6 +737,11 @@ final class WorkspaceState: ObservableObject {
         selectedFileURL = url
     }
 
+    func loadChildrenIfNeeded(for directoryURL: URL) {
+        guard updateFileTreeDirectory(directoryURL, in: &fileTree) else { return }
+        scheduleSessionPersistence()
+    }
+
     func openFile(_ url: URL) {
         selectedFileURL = url
 
@@ -696,22 +753,53 @@ final class WorkspaceState: ObservableObject {
             return
         }
 
-        do {
-            let loadedFile = try Self.loadTextFile(at: url)
-            let document = DocumentState(
-                title: url.lastPathComponent,
-                filePath: url.path,
-                text: loadedFile.text,
-                isDirty: false,
-                metadata: loadedFile.metadata
+        fileSystemError = nil
+        let document = DocumentState(
+            title: url.lastPathComponent,
+            filePath: url.path,
+            text: Self.makeLoadingPreview(for: url),
+            isDirty: false,
+            metadata: DocumentMetadata(
+                encodingName: "Preview Loading",
+                lineEnding: .lf,
+                isReadOnly: true,
+                isPartialPreview: true,
+                kindName: Self.inferKindName(for: url),
+                lastKnownModificationDate: Self.fileModificationDate(at: url)
             )
-            documents.append(document)
-            attachDocumentToTextPane(document)
-            registerRecentFile(url)
+        )
+        documents.append(document)
+        attachDocumentToTextPane(document)
+        registerRecentFile(url)
+        scheduleSessionPersistence(immediate: true)
+
+        Task {
+            let result = await Self.loadTextFileInBackground(at: url)
+            applyOpenFileResult(result, for: url, documentID: document.id)
+        }
+    }
+
+    private func applyOpenFileResult(_ result: Result<LoadedTextFile, Error>, for url: URL, documentID: UUID) {
+        switch result {
+        case .success(let loadedFile):
+            guard let documentIndex = documents.firstIndex(where: { $0.id == documentID }) else {
+                return
+            }
+
+            if documents[documentIndex].isDirty {
+                fileSystemError = "Preview loaded, but the tab has local edits: \(url.lastPathComponent)"
+                return
+            }
+
+            documents[documentIndex].text = loadedFile.text
+            documents[documentIndex].metadata = loadedFile.metadata
+            documents[documentIndex].isDirty = false
             fileSystemError = nil
             refreshSearchResults()
+            refreshEditorViewport()
             scheduleSessionPersistence(immediate: true)
-        } catch {
+
+        case .failure(let error):
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             fileSystemError = "Failed to open file: \(url.lastPathComponent) (\(message))"
         }
@@ -743,14 +831,27 @@ final class WorkspaceState: ObservableObject {
 
     func increaseEditorFontSize() {
         editorFontSize = min(editorFontSize + 1, CodeEditorMetrics.maximumTextFontSize)
+        scheduleSessionPersistence()
     }
 
     func decreaseEditorFontSize() {
         editorFontSize = max(editorFontSize - 1, CodeEditorMetrics.minimumTextFontSize)
+        scheduleSessionPersistence()
     }
 
     func toggleLineWrapping() {
         wrapsLines.toggle()
+        scheduleSessionPersistence()
+    }
+
+    func toggleCurrentLineHighlight() {
+        highlightsCurrentLine.toggle()
+        scheduleSessionPersistence()
+    }
+
+    func toggleInvisibleCharacters() {
+        showsInvisibleCharacters.toggle()
+        scheduleSessionPersistence()
     }
 
     var selectedSearchResultIndex: Int? {
@@ -772,8 +873,27 @@ final class WorkspaceState: ObservableObject {
         try saveDocument(documentID: document.id, to: url)
     }
 
+    func saveDocument(documentID: UUID, as url: URL) throws {
+        try saveDocument(documentID: documentID, to: url)
+    }
+
     func setFileSystemError(_ message: String?) {
         fileSystemError = message
+    }
+
+    func reloadPendingExternalFileChange() {
+        guard let pendingExternalFileChange else { return }
+        reloadDocumentFromDisk(documentID: pendingExternalFileChange.documentID)
+        self.pendingExternalFileChange = nil
+    }
+
+    func keepLocalVersionForPendingExternalFileChange() {
+        pendingExternalFileChange = nil
+    }
+
+    func hasExternalConflict(for documentID: UUID?) -> Bool {
+        guard let documentID else { return false }
+        return externalConflictDocumentIDs.contains(documentID)
     }
 
     func openRecentFile(_ url: URL) {
@@ -810,25 +930,23 @@ final class WorkspaceState: ObservableObject {
         }
 
         if documents[documentIndex].isDirty {
-            fileSystemError = "File changed externally: \(documents[documentIndex].title). Save or reopen after resolving your edits."
             documents[documentIndex].metadata.lastKnownModificationDate = currentModificationDate
+            externalConflictDocumentIDs.insert(documents[documentIndex].id)
+            if pendingExternalFileChange?.documentID != documents[documentIndex].id {
+                pendingExternalFileChange = ExternalFileChangeState(
+                    documentID: documents[documentIndex].id,
+                    documentTitle: documents[documentIndex].title,
+                    filePath: filePath,
+                    modificationDate: currentModificationDate
+                )
+            }
             return
         }
 
-        do {
-            let url = URL(fileURLWithPath: filePath)
-            let loadedFile = try Self.loadTextFile(at: url)
-            documents[documentIndex].text = loadedFile.text
-            documents[documentIndex].metadata = loadedFile.metadata
-            fileSystemError = nil
-            refreshSearchResults()
-        } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            fileSystemError = "Failed to reload file: \(documents[documentIndex].title) (\(message))"
-        }
+        reloadDocumentFromDisk(documentID: documents[documentIndex].id)
     }
 
-    private static func loadDirectoryItems(at rootURL: URL) throws -> [FileItem] {
+    private static func loadDirectoryItems(at rootURL: URL, recursively: Bool) throws -> [FileItem] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey, .isRegularFileKey]
         let urls = try FileManager.default.contentsOfDirectory(
             at: rootURL,
@@ -838,10 +956,10 @@ final class WorkspaceState: ObservableObject {
 
         return try urls
             .sorted(by: sortFileURLs)
-            .map { try loadFileItem(at: $0) }
+            .map { try loadFileItem(at: $0, recursively: recursively) }
     }
 
-    private static func loadFileItem(at url: URL) throws -> FileItem {
+    private static func loadFileItem(at url: URL, recursively: Bool) throws -> FileItem {
         let values = try url.resourceValues(forKeys: [.isDirectoryKey])
         let isDirectory = values.isDirectory ?? false
 
@@ -849,8 +967,32 @@ final class WorkspaceState: ObservableObject {
             return FileItem(url: url, isDirectory: false)
         }
 
-        let children = try loadDirectoryItems(at: url)
+        let children = recursively ? try loadDirectoryItems(at: url, recursively: true) : nil
         return FileItem(url: url, isDirectory: true, children: children)
+    }
+
+    private func updateFileTreeDirectory(_ directoryURL: URL, in items: inout [FileItem]) -> Bool {
+        for index in items.indices {
+            if items[index].url == directoryURL, items[index].isDirectory {
+                guard items[index].children == nil else { return false }
+
+                do {
+                    items[index].children = try Self.loadDirectoryItems(at: directoryURL, recursively: false)
+                    fileSystemError = nil
+                } catch {
+                    items[index].children = []
+                    fileSystemError = "Failed to load folder: \(items[index].name) (\(error.localizedDescription))"
+                }
+                return true
+            }
+
+            if items[index].children != nil,
+               updateFileTreeDirectory(directoryURL, in: &items[index].children!) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private static func sortFileURLs(_ lhs: URL, _ rhs: URL) -> Bool {
@@ -866,38 +1008,98 @@ final class WorkspaceState: ObservableObject {
         return lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
     }
 
-    private static func loadTextFile(at url: URL) throws -> LoadedTextFile {
-        guard let data = try? Data(contentsOf: url) else {
+    nonisolated private static func loadTextFileInBackground(at url: URL) async -> Result<LoadedTextFile, Error> {
+        await Task.detached(priority: .userInitiated) {
+            Result {
+                try loadTextFile(at: url)
+            }
+        }.value
+    }
+
+    nonisolated private static func loadTextFile(at url: URL) throws -> LoadedTextFile {
+        guard let fileHandle = try? FileHandle(forReadingFrom: url) else {
             throw FileOpenError.unreadable
         }
+        defer {
+            try? fileHandle.close()
+        }
+
+        let fileSize = fileByteSize(at: url)
+        let readLimit = filePreviewByteLimit
+        let data = try fileHandle.read(upToCount: readLimit) ?? Data()
+        let isPartialPreview = fileSize.map { $0 > UInt64(readLimit) } ?? false
 
         if data.isEmpty {
             return LoadedTextFile(
                 text: "",
-                metadata: inferMetadata(for: url, text: "", encodingName: "UTF-8")
+                metadata: inferMetadata(
+                    for: url,
+                    text: "",
+                    encodingName: "UTF-8",
+                    isPartialPreview: false
+                )
+            )
+        }
+
+        if let decoded = decodeText(data) {
+            let text = isPartialPreview
+                ? appendPartialPreviewNotice(to: decoded.text, byteLimit: readLimit, fileSize: fileSize)
+                : decoded.text
+            return LoadedTextFile(
+                text: text,
+                metadata: inferMetadata(
+                    for: url,
+                    text: text,
+                    encodingName: decoded.encodingName,
+                    isPartialPreview: isPartialPreview
+                )
             )
         }
 
         if looksLikeBinaryData(data) {
-            throw FileOpenError.binaryContent
-        }
-
-        if let decoded = decodeText(data) {
+            let text = makeBinaryPreview(for: url, data: data, fileSize: fileSize, isPartialPreview: isPartialPreview)
             return LoadedTextFile(
-                text: decoded.text,
-                metadata: inferMetadata(for: url, text: decoded.text, encodingName: decoded.encodingName)
+                text: text,
+                metadata: DocumentMetadata(
+                    encodingName: "Binary Preview",
+                    lineEnding: .lf,
+                    isReadOnly: true,
+                    isPartialPreview: true,
+                    kindName: "Binary",
+                    lastKnownModificationDate: fileModificationDate(at: url)
+                )
             )
         }
 
-        throw FileOpenError.unsupportedEncoding
+        let fallbackText = appendPartialPreviewNotice(
+            to: String(decoding: data, as: UTF8.self),
+            byteLimit: readLimit,
+            fileSize: fileSize
+        )
+        return LoadedTextFile(
+            text: fallbackText,
+            metadata: inferMetadata(
+                for: url,
+                text: fallbackText,
+                encodingName: "UTF-8 Lossy Preview",
+                isPartialPreview: true
+            )
+        )
     }
 
-    private static func decodeText(_ data: Data) -> (text: String, encodingName: String)? {
+    nonisolated private static func decodeText(_ data: Data) -> (text: String, encodingName: String)? {
         let encodings: [(String.Encoding, String)] = [
             (.utf8, "UTF-8"),
             (.unicode, "UTF-16"),
             (.utf16LittleEndian, "UTF-16 LE"),
-            (.utf16BigEndian, "UTF-16 BE")
+            (.utf16BigEndian, "UTF-16 BE"),
+            (stringEncoding(for: .dosKorean), "CP949 / DOS Korean"),
+            (stringEncoding(for: .EUC_KR), "EUC-KR"),
+            (stringEncoding(for: .shiftJIS), "Shift JIS"),
+            (stringEncoding(for: .GB_18030_2000), "GB 18030"),
+            (stringEncoding(for: .big5), "Big5"),
+            (.isoLatin1, "ISO Latin 1"),
+            (.windowsCP1252, "Windows Latin 1")
         ]
 
         for (encoding, name) in encodings {
@@ -909,7 +1111,11 @@ final class WorkspaceState: ObservableObject {
         return nil
     }
 
-    private static func looksLikeBinaryData(_ data: Data) -> Bool {
+    nonisolated private static func stringEncoding(for encoding: CFStringEncodings) -> String.Encoding {
+        String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(encoding.rawValue)))
+    }
+
+    nonisolated private static func looksLikeBinaryData(_ data: Data) -> Bool {
         let sample = data.prefix(4096)
 
         if sample.contains(0) {
@@ -927,22 +1133,110 @@ final class WorkspaceState: ObservableObject {
         return Double(suspiciousByteCount) / Double(sample.count) > 0.1
     }
 
-    private static func inferMetadata(for url: URL, text: String, encodingName: String) -> DocumentMetadata {
+    nonisolated private static func appendPartialPreviewNotice(
+        to text: String,
+        byteLimit: Int,
+        fileSize: UInt64?
+    ) -> String {
+        guard fileSize.map({ $0 > UInt64(byteLimit) }) ?? true else {
+            return text
+        }
+
+        let totalSizeText = fileSize.map { formatByteCount($0) } ?? "unknown size"
+        let previewSizeText = formatByteCount(UInt64(byteLimit))
+        return """
+        \(text)
+
+        ---
+        Partial preview: showing the first \(previewSizeText) of \(totalSizeText). Save As is available, but direct overwrite is disabled for this preview.
+        """
+    }
+
+    nonisolated private static func makeBinaryPreview(
+        for url: URL,
+        data: Data,
+        fileSize: UInt64?,
+        isPartialPreview: Bool
+    ) -> String {
+        let totalSizeText = fileSize.map { formatByteCount($0) } ?? "unknown size"
+        var lines = [
+            "Preview: \(url.lastPathComponent)",
+            "Size: \(totalSizeText)",
+            "Type: binary or non-text data",
+            "Showing: first \(formatByteCount(UInt64(min(data.count, binaryPreviewByteLimit))))",
+            "",
+            "Offset      Hex bytes                                               ASCII"
+        ]
+
+        let bytes = Array(data.prefix(binaryPreviewByteLimit))
+        var offset = 0
+        while offset < bytes.count {
+            let chunk = Array(bytes[offset..<min(offset + 16, bytes.count)])
+            let hex = chunk.map { String(format: "%02X", $0) }.joined(separator: " ")
+            let paddedHex = hex.padding(toLength: 47, withPad: " ", startingAt: 0)
+            let ascii = chunk.map { byte -> String in
+                if byte >= 0x20 && byte <= 0x7E {
+                    return String(UnicodeScalar(Int(byte))!)
+                }
+                return "."
+            }.joined()
+            lines.append(String(format: "%08X    %@    %@", offset, paddedHex, ascii))
+            offset += 16
+        }
+
+        if isPartialPreview || data.count > bytes.count {
+            lines.append("")
+            lines.append("Partial preview: direct overwrite is disabled for this tab.")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated private static func makeLoadingPreview(for url: URL) -> String {
+        """
+        Loading preview: \(url.lastPathComponent)
+
+        The app is reading only the beginning of this file first. Cloud-backed files may take longer to provide bytes, but the editor remains usable.
+        """
+    }
+
+    nonisolated private static func formatByteCount(_ byteCount: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
+    }
+
+    nonisolated private static func inferMetadata(
+        for url: URL,
+        text: String,
+        encodingName: String,
+        isPartialPreview: Bool = false
+    ) -> DocumentMetadata {
         DocumentMetadata(
             encodingName: encodingName,
             lineEnding: inferLineEnding(in: text),
-            isReadOnly: !FileManager.default.isWritableFile(atPath: url.path),
+            isReadOnly: isPartialPreview || !FileManager.default.isWritableFile(atPath: url.path),
+            isPartialPreview: isPartialPreview,
             kindName: inferKindName(for: url),
             lastKnownModificationDate: fileModificationDate(at: url)
         )
     }
 
-    private static func fileModificationDate(at url: URL) -> Date? {
+    nonisolated private static func fileByteSize(at url: URL) -> UInt64? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .totalFileSizeKey])
+        if let fileSize = values?.fileSize {
+            return UInt64(max(fileSize, 0))
+        }
+        if let totalFileSize = values?.totalFileSize {
+            return UInt64(max(totalFileSize, 0))
+        }
+        return nil
+    }
+
+    nonisolated private static func fileModificationDate(at url: URL) -> Date? {
         let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
         return values?.contentModificationDate
     }
 
-    private static func inferLineEnding(in text: String) -> LineEndingKind {
+    nonisolated private static func inferLineEnding(in text: String) -> LineEndingKind {
         let containsCRLF = text.contains("\r\n")
         let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
         let containsLF = normalized.contains("\n")
@@ -964,7 +1258,7 @@ final class WorkspaceState: ObservableObject {
         return .none
     }
 
-    private static func inferKindName(for url: URL) -> String {
+    nonisolated private static func inferKindName(for url: URL) -> String {
         switch url.pathExtension.lowercased() {
         case "md", "markdown":
             return "Markdown"
@@ -1033,6 +1327,7 @@ final class WorkspaceState: ObservableObject {
 
             if !isDocumentStillOpen {
                 documents.removeAll(where: { $0.id == documentID && $0.filePath == nil })
+                externalConflictDocumentIDs.remove(documentID)
             }
         }
 
@@ -1081,6 +1376,10 @@ final class WorkspaceState: ObservableObject {
 
     private func saveDocument(documentID: UUID, to url: URL) throws {
         guard let documentIndex = documents.firstIndex(where: { $0.id == documentID }) else { return }
+        if documents[documentIndex].metadata.isPartialPreview,
+           documents[documentIndex].filePath == url.path {
+            throw FileOpenError.cannotOverwritePartialPreview
+        }
 
         try documents[documentIndex].text.write(to: url, atomically: true, encoding: .utf8)
 
@@ -1090,10 +1389,15 @@ final class WorkspaceState: ObservableObject {
         documents[documentIndex].metadata = Self.inferMetadata(
             for: url,
             text: documents[documentIndex].text,
-            encodingName: "UTF-8"
+            encodingName: "UTF-8",
+            isPartialPreview: false
         )
         selectedFileURL = url
         registerRecentFile(url)
+        if pendingExternalFileChange?.documentID == documentID {
+            pendingExternalFileChange = nil
+        }
+        externalConflictDocumentIDs.remove(documentID)
 
         for paneIndex in panes.indices {
             for tabIndex in panes[paneIndex].tabs.indices where panes[paneIndex].tabs[tabIndex].documentID == documentID {
@@ -1113,6 +1417,10 @@ final class WorkspaceState: ObservableObject {
             searchQuery: search.query,
             searchReplacement: search.replacement,
             searchIsCaseSensitive: search.isCaseSensitive,
+            editorFontSize: Double(editorFontSize),
+            wrapsLines: wrapsLines,
+            highlightsCurrentLine: highlightsCurrentLine,
+            showsInvisibleCharacters: showsInvisibleCharacters,
             selectedSearchResultIndex: selectedSearchResultIndex.map { $0 - 1 },
             panes: panes.map { pane in
                 PaneSnapshot(
@@ -1145,6 +1453,10 @@ final class WorkspaceState: ObservableObject {
         search.query = snapshot.searchQuery
         search.replacement = snapshot.searchReplacement
         search.isCaseSensitive = snapshot.searchIsCaseSensitive
+        editorFontSize = CGFloat(snapshot.editorFontSize)
+        wrapsLines = snapshot.wrapsLines
+        highlightsCurrentLine = snapshot.highlightsCurrentLine
+        showsInvisibleCharacters = snapshot.showsInvisibleCharacters
         search.selectedResultID = nil
 
         if let workspaceRootPath = snapshot.workspaceRootPath {
@@ -1246,6 +1558,7 @@ final class WorkspaceState: ObservableObject {
             search.results = []
             search.selectedResultID = nil
             activeSelectionRange = NSRange(location: NSNotFound, length: 0)
+            editorViewport = EditorViewportState()
             return
         }
 
@@ -1363,6 +1676,7 @@ final class WorkspaceState: ObservableObject {
                 activePaneID = panes[index].id
                 activeSelectionRange = document(for: tab)?.selectionRange ?? NSRange(location: NSNotFound, length: 0)
                 refreshSearchResults()
+                refreshEditorViewport()
                 return
             }
         }
@@ -1381,6 +1695,7 @@ final class WorkspaceState: ObservableObject {
         activePaneID = panes[targetPaneIndex].id
         activeSelectionRange = document.selectionRange
         refreshSearchResults()
+        refreshEditorViewport()
     }
 
     private func syncActiveSelectionRangeToDocument() {
@@ -1395,6 +1710,53 @@ final class WorkspaceState: ObservableObject {
 
         documents[documentIndex].selectionRange = activeSelectionRange
         scheduleSessionPersistence()
+    }
+
+    private func refreshEditorViewport() {
+        let totalLineCount = max(logicalLines(in: activeDocument?.text ?? "").count, 1)
+        let nextViewport = EditorViewportState(
+            topLine: min(currentLineNumber, totalLineCount),
+            visibleLineCount: 1,
+            totalLineCount: totalLineCount
+        )
+        guard nextViewport != editorViewport else { return }
+        editorViewport = nextViewport
+    }
+
+    private func reloadDocumentFromDisk(documentID: UUID) {
+        guard let documentIndex = documents.firstIndex(where: { $0.id == documentID }),
+              let filePath = documents[documentIndex].filePath else {
+            return
+        }
+
+        do {
+            let url = URL(fileURLWithPath: filePath)
+            let loadedFile = try Self.loadTextFile(at: url)
+            documents[documentIndex].text = loadedFile.text
+            documents[documentIndex].metadata = loadedFile.metadata
+            documents[documentIndex].isDirty = false
+
+            let textLength = (loadedFile.text as NSString).length
+            let currentSelection = documents[documentIndex].selectionRange
+            let clampedLocation = min(max(currentSelection.location, 0), textLength)
+            let clampedLength = min(max(currentSelection.length, 0), max(textLength - clampedLocation, 0))
+            documents[documentIndex].selectionRange = NSRange(location: clampedLocation, length: clampedLength)
+
+            if activeDocument?.id == documentID {
+                activeSelectionRange = documents[documentIndex].selectionRange
+            }
+
+            fileSystemError = nil
+            if pendingExternalFileChange?.documentID == documentID {
+                pendingExternalFileChange = nil
+            }
+            externalConflictDocumentIDs.remove(documentID)
+            refreshSearchResults()
+            refreshEditorViewport()
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            fileSystemError = "Failed to reload file: \(documents[documentIndex].title) (\(message))"
+        }
     }
 
     private func scheduleSessionPersistence(immediate: Bool = false) {

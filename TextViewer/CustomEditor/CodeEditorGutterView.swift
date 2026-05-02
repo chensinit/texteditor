@@ -30,6 +30,14 @@ final class CodeEditorGutterView: NSView {
         }
     }
 
+    var highlightsCurrentLine: Bool = true {
+        didSet {
+            if oldValue != highlightsCurrentLine {
+                needsDisplay = true
+            }
+        }
+    }
+
     override var isFlipped: Bool {
         true
     }
@@ -87,7 +95,7 @@ final class CodeEditorGutterView: NSView {
                 height: lineRect.height
             )
 
-            if lineNumber == currentLineNumber {
+            if highlightsCurrentLine && lineNumber == currentLineNumber {
                 let highlightRect = NSRect(
                     x: 8,
                     y: drawRect.minY,
@@ -104,7 +112,7 @@ final class CodeEditorGutterView: NSView {
 
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: CodeEditorMetrics.lineNumberFont(size: fontSize),
-                .foregroundColor: lineNumber == currentLineNumber
+                .foregroundColor: highlightsCurrentLine && lineNumber == currentLineNumber
                     ? CodeEditorMetrics.currentLineNumberColor
                     : CodeEditorMetrics.lineNumberColor,
                 .paragraphStyle: paragraphStyle

@@ -14,6 +14,7 @@ final class CodeEditorContainerView: NSView {
 
     var onTextChange: ((String, NSRange) -> Void)?
     var onSelectionChange: ((NSRange) -> Void)?
+    var onViewportChange: ((Int, Int, Int) -> Void)?
     var onOpenDroppedURL: ((URL) -> Void)? {
         didSet {
             textView.onOpenDroppedURL = onOpenDroppedURL
@@ -61,7 +62,15 @@ final class CodeEditorContainerView: NSView {
         applyPendingSelectionIfNeeded()
     }
 
-    func update(text: String, selectedRange: NSRange, currentLineNumber: Int, fontSize: CGFloat, wrapsLines: Bool) {
+    func update(
+        text: String,
+        selectedRange: NSRange,
+        currentLineNumber: Int,
+        fontSize: CGFloat,
+        wrapsLines: Bool,
+        highlightsCurrentLine: Bool,
+        showsInvisibleCharacters: Bool
+    ) {
         let isFocused = window?.firstResponder === textView
         let isComposing = textView.hasMarkedText()
         let shouldRestoreSelection = !isFocused && !isComposing
@@ -70,6 +79,9 @@ final class CodeEditorContainerView: NSView {
             textView.font = CodeEditorMetrics.textFont(size: fontSize)
         }
         gutterView.fontSize = fontSize
+        gutterView.highlightsCurrentLine = highlightsCurrentLine
+        textView.highlightsCurrentLine = highlightsCurrentLine
+        textView.showsInvisibleCharacters = showsInvisibleCharacters
         applyWrapMode(wrapsLines)
 
         if textView.string != text && !isFocused && !isComposing {
@@ -95,6 +107,7 @@ final class CodeEditorContainerView: NSView {
         syncGutterScrollOffset()
         textView.needsDisplay = true
         gutterView.needsDisplay = true
+        emitViewportState()
     }
 
     func update(
@@ -103,6 +116,8 @@ final class CodeEditorContainerView: NSView {
         currentLineNumber: Int,
         fontSize: CGFloat,
         wrapsLines: Bool,
+        highlightsCurrentLine: Bool,
+        showsInvisibleCharacters: Bool,
         searchRanges: [NSRange],
         selectedSearchRange: NSRange?
     ) {
@@ -113,7 +128,9 @@ final class CodeEditorContainerView: NSView {
             selectedRange: selectedRange,
             currentLineNumber: currentLineNumber,
             fontSize: fontSize,
-            wrapsLines: wrapsLines
+            wrapsLines: wrapsLines,
+            highlightsCurrentLine: highlightsCurrentLine,
+            showsInvisibleCharacters: showsInvisibleCharacters
         )
     }
 
@@ -122,6 +139,7 @@ final class CodeEditorContainerView: NSView {
         guard notification.object as? NSTextView === textView else { return }
         onTextChange?(textView.string, textView.selectedRange())
         gutterView.needsDisplay = true
+        emitViewportState()
     }
 
     @objc
@@ -131,6 +149,7 @@ final class CodeEditorContainerView: NSView {
         textView.onNeedsCurrentLineRefresh?()
         onSelectionChange?(textView.selectedRange())
         gutterView.needsDisplay = true
+        emitViewportState()
     }
 
     @objc
@@ -138,6 +157,7 @@ final class CodeEditorContainerView: NSView {
         guard notification.object as? NSClipView === scrollView.contentView else { return }
         syncGutterScrollOffset()
         gutterView.needsDisplay = true
+        emitViewportState()
     }
 
     private func configureScrollView() {
@@ -287,6 +307,63 @@ final class CodeEditorContainerView: NSView {
         textView.needsDisplay = true
         self.pendingSelectionRange = nil
     }
+
+    private func emitViewportState() {
+        guard
+            let layoutManager = textView.layoutManager,
+            let textContainer = textView.textContainer
+        else {
+            onViewportChange?(1, 1, 1)
+            return
+        }
+
+        let text = textView.string as NSString
+        let totalLineCount = max(logicalLines(in: textView.string).count, 1)
+        let visibleRect = scrollView.contentView.bounds.intersection(textView.bounds)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
+
+        guard glyphRange.length > 0, text.length > 0 else {
+            onViewportChange?(1, 1, totalLineCount)
+            return
+        }
+
+        let startCharacterIndex = layoutManager.characterIndexForGlyph(at: glyphRange.location)
+        let endGlyphIndex = max(glyphRange.location + glyphRange.length - 1, glyphRange.location)
+        let endCharacterIndex = min(
+            layoutManager.characterIndexForGlyph(at: endGlyphIndex),
+            max(text.length - 1, 0)
+        )
+
+        let topLine = lineNumber(at: startCharacterIndex, in: text)
+        let bottomLine = max(topLine, lineNumber(at: endCharacterIndex, in: text))
+        onViewportChange?(topLine, bottomLine - topLine + 1, totalLineCount)
+    }
+
+    private func lineNumber(at characterIndex: Int, in text: NSString) -> Int {
+        if text.length == 0 {
+            return 1
+        }
+
+        let safeIndex = min(max(characterIndex, 0), max(text.length - 1, 0))
+        var lineNumber = 1
+        var lineStart = 0
+        var lineEnd = 0
+        var contentsEnd = 0
+
+        while lineStart < text.length {
+            text.getLineStart(&lineStart, end: &lineEnd, contentsEnd: &contentsEnd, for: NSRange(location: lineStart, length: 0))
+            if safeIndex < lineEnd {
+                return lineNumber
+            }
+            if lineEnd >= text.length {
+                break
+            }
+            lineNumber += 1
+            lineStart = lineEnd
+        }
+
+        return lineNumber
+    }
 }
 
 final class CodeEditorTextView: NSTextView {
@@ -294,6 +371,8 @@ final class CodeEditorTextView: NSTextView {
     var onOpenDroppedURL: ((URL) -> Void)?
     var searchRanges: [NSRange] = []
     var selectedSearchRange: NSRange?
+    var highlightsCurrentLine = true
+    var showsInvisibleCharacters = false
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         if droppedFileURL(from: sender) != nil {
@@ -322,7 +401,17 @@ final class CodeEditorTextView: NSTextView {
         rect.fill()
 
         drawSearchHighlights()
-        drawCurrentLineHighlight()
+        if highlightsCurrentLine {
+            drawCurrentLineHighlight()
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        if showsInvisibleCharacters {
+            drawInvisibleCharacters(in: dirtyRect)
+        }
     }
 
     override func insertTab(_ sender: Any?) {
@@ -399,6 +488,75 @@ final class CodeEditorTextView: NSTextView {
                 color.setFill()
                 NSBezierPath(roundedRect: drawRect, xRadius: 3, yRadius: 3).fill()
             }
+        }
+    }
+
+    private func drawInvisibleCharacters(in dirtyRect: NSRect) {
+        guard
+            let layoutManager,
+            let textContainer
+        else {
+            return
+        }
+
+        let visibleRect = enclosingScrollView?.contentView.bounds.intersection(bounds) ?? dirtyRect
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
+        guard glyphRange.length > 0 else { return }
+
+        let text = string as NSString
+        let color = CodeEditorMetrics.invisibleCharacterColor
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? CodeEditorMetrics.textFont(size: CodeEditorMetrics.defaultTextFontSize),
+            .foregroundColor: color
+        ]
+
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { _, usedRect, textContainer, glyphRange, _ in
+            guard glyphRange.length > 0 else { return }
+
+            let characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            let lineText = text.substring(with: characterRange)
+            var currentCharacterIndex = characterRange.location
+
+            for scalar in lineText {
+                defer {
+                    currentCharacterIndex += (String(scalar) as NSString).length
+                }
+
+                let symbol: String
+                switch scalar {
+                case " ":
+                    symbol = "·"
+                case "\t":
+                    symbol = "→"
+                default:
+                    continue
+                }
+
+                let characterNSRange = NSRange(location: currentCharacterIndex, length: 1)
+                let glyphNSRange = layoutManager.glyphRange(forCharacterRange: characterNSRange, actualCharacterRange: nil)
+                guard glyphNSRange.length > 0 else { continue }
+
+                let glyphRect = layoutManager.boundingRect(forGlyphRange: glyphNSRange, in: textContainer)
+                let drawPoint = NSPoint(
+                    x: glyphRect.midX - 3,
+                    y: glyphRect.minY + self.textContainerInset.height
+                )
+                NSAttributedString(string: symbol, attributes: attributes).draw(at: drawPoint)
+            }
+
+            let lineEnd = NSMaxRange(characterRange)
+            guard lineEnd < text.length else { return }
+
+            let newlineRange = NSRange(location: lineEnd, length: 1)
+            let newlineString = text.substring(with: newlineRange)
+            guard newlineString == "\n" || newlineString == "\r" else { return }
+
+            let symbol = newlineString == "\r" ? "↵" : "¬"
+            let drawPoint = NSPoint(
+                x: max(usedRect.maxX + 2, self.textContainerInset.width),
+                y: usedRect.minY + self.textContainerInset.height
+            )
+            NSAttributedString(string: symbol, attributes: attributes).draw(at: drawPoint)
         }
     }
 

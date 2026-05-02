@@ -59,6 +59,20 @@ struct EditorShellView: View {
         } message: { pending in
             Text("\(pending.documentTitle) has unsaved changes.")
         }
+        .alert(
+            "File Changed on Disk",
+            isPresented: pendingExternalChangeBinding,
+            presenting: workspace.pendingExternalFileChange
+        ) { _ in
+            Button("Keep My Changes", role: .cancel) {
+                workspace.keepLocalVersionForPendingExternalFileChange()
+            }
+            Button("Reload from Disk", role: .destructive) {
+                workspace.reloadPendingExternalFileChange()
+            }
+        } message: { pending in
+            Text("\(pending.documentTitle) was modified outside the app. Reload to discard local edits, or keep your current version and save later.")
+        }
         .sheet(isPresented: $workspace.isShowingGoToLine) {
             GoToLineSheet()
                 .environmentObject(workspace)
@@ -75,13 +89,24 @@ struct EditorShellView: View {
             }
         )
     }
+
+    private var pendingExternalChangeBinding: Binding<Bool> {
+        Binding(
+            get: { workspace.pendingExternalFileChange != nil },
+            set: { isPresented in
+                if !isPresented {
+                    workspace.keepLocalVersionForPendingExternalFileChange()
+                }
+            }
+        )
+    }
 }
 
 private struct TopToolbarView: View {
     @EnvironmentObject private var workspace: WorkspaceState
 
     var body: some View {
-        HStack(spacing: 14) {
+        VStack(spacing: 7) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     toolbarGroup {
@@ -98,6 +123,11 @@ private struct TopToolbarView: View {
                             Button("Open Folder") {
                                 openWorkspaceFolder()
                             }
+
+                            Button("Save As...") {
+                                saveDocumentAs()
+                            }
+                            .disabled(workspace.activeDocument == nil)
 
                             Divider()
 
@@ -173,6 +203,18 @@ private struct TopToolbarView: View {
                                 workspace.toggleLineWrapping()
                             }
                             .disabled(workspace.activeDocument == nil)
+
+                            Divider()
+
+                            Button(workspace.highlightsCurrentLine ? "Disable Current Line Highlight" : "Enable Current Line Highlight") {
+                                workspace.toggleCurrentLineHighlight()
+                            }
+                            .disabled(workspace.activeDocument == nil)
+
+                            Button(workspace.showsInvisibleCharacters ? "Hide Invisible Characters" : "Show Invisible Characters") {
+                                workspace.toggleInvisibleCharacters()
+                            }
+                            .disabled(workspace.activeDocument == nil)
                         } label: {
                             toolbarMenuLabel("textformat", title: "View")
                         }
@@ -201,63 +243,77 @@ private struct TopToolbarView: View {
                                 workspace.increaseEditorFontSize()
                             }
                         }
+
+                        Toggle(isOn: Binding(
+                            get: { workspace.highlightsCurrentLine },
+                            set: { _ in workspace.toggleCurrentLineHighlight() }
+                        )) {
+                            Image(systemName: workspace.highlightsCurrentLine ? "line.3.horizontal" : "line.3.horizontal.decrease")
+                        }
+                        .toggleStyle(.button)
+                        .help(workspace.highlightsCurrentLine ? "Disable Current Line Highlight" : "Enable Current Line Highlight")
+                        .disabled(workspace.activeDocument == nil)
+
+                        Toggle(isOn: Binding(
+                            get: { workspace.showsInvisibleCharacters },
+                            set: { _ in workspace.toggleInvisibleCharacters() }
+                        )) {
+                            Image(systemName: workspace.showsInvisibleCharacters ? "paragraphsign" : "paragraphsign.slash")
+                        }
+                        .toggleStyle(.button)
+                        .help(workspace.showsInvisibleCharacters ? "Hide Invisible Characters" : "Show Invisible Characters")
+                        .disabled(workspace.activeDocument == nil)
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, 1)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(workspace.activeDocument?.title ?? "No File")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .lineLimit(1)
-                Text(workspace.workspaceTitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(width: 170, alignment: .leading)
+            HStack(spacing: 10) {
+                toolbarGroup {
+                    Picker("Layout", selection: Binding(
+                        get: { workspace.layoutPreset },
+                        set: { workspace.applyLayout($0) }
+                    )) {
+                        ForEach(LayoutPreset.allCases) { preset in
+                            Text(preset.title).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 210)
 
-            Picker("Layout", selection: Binding(
-                get: { workspace.layoutPreset },
-                set: { workspace.applyLayout($0) }
-            )) {
-                ForEach(LayoutPreset.allCases) { preset in
-                    Text(preset.title).tag(preset)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 250)
-
-            if let activePane = workspace.activePane {
-                Picker("Pane Type", selection: Binding(
-                    get: { activePane.kind },
-                    set: { workspace.setPaneKind($0, for: activePane.id) }
-                )) {
-                    ForEach(PaneKind.allCases) { kind in
-                        Text(kind.rawValue).tag(kind)
+                    if let activePane = workspace.activePane {
+                        Picker("Pane Type", selection: Binding(
+                            get: { activePane.kind },
+                            set: { workspace.setPaneKind($0, for: activePane.id) }
+                        )) {
+                            ForEach(PaneKind.allCases) { kind in
+                                Text(kind.rawValue).tag(kind)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 225)
                     }
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 250)
+
+                Spacer(minLength: 0)
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 11)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
         .background(Color.black.opacity(0.32))
     }
 
     @ViewBuilder
     private func toolbarGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 6, content: content)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
             .background(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 8)
                     .fill(Color.white.opacity(0.045))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.white.opacity(0.06), lineWidth: 1)
             )
     }
@@ -265,38 +321,38 @@ private struct TopToolbarView: View {
     private func toolbarButton(_ systemImage: String, title: String, isDisabled: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .semibold))
-                .frame(width: 28, height: 28)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 25, height: 25)
         }
         .buttonStyle(.plain)
         .foregroundStyle(isDisabled ? Color.secondary.opacity(0.6) : Color.white.opacity(0.9))
         .background(
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: 7)
                 .fill(Color.white.opacity(0.03))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: 7)
                 .stroke(Color.white.opacity(0.05), lineWidth: 1)
         )
-        .contentShape(RoundedRectangle(cornerRadius: 9))
+        .contentShape(RoundedRectangle(cornerRadius: 7))
         .help(title)
         .disabled(isDisabled)
     }
 
     private func toolbarMenuLabel(_ systemImage: String, title: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 13, weight: .semibold))
-            .frame(width: 28, height: 28)
+            .font(.system(size: 12, weight: .semibold))
+            .frame(width: 25, height: 25)
             .background(
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: 7)
                     .fill(Color.white.opacity(0.03))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: 7)
                     .stroke(Color.white.opacity(0.05), lineWidth: 1)
             )
             .foregroundStyle(.white.opacity(0.9))
-            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
             .help(title)
     }
 
@@ -729,20 +785,40 @@ private struct SearchFieldView: NSViewRepresentable {
 
 private struct FileTreeRow: View {
     @EnvironmentObject private var workspace: WorkspaceState
+    @State private var isExpanded = false
 
     let item: FileItem
 
     var body: some View {
         Group {
             if item.isDirectory {
-                DisclosureGroup {
+                DisclosureGroup(isExpanded: $isExpanded) {
                     if let children = item.children {
-                        ForEach(children) { child in
-                            FileTreeRow(item: child)
+                        if children.isEmpty {
+                            Text("Empty")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 22)
+                                .padding(.vertical, 4)
+                        } else {
+                            ForEach(children) { child in
+                                FileTreeRow(item: child)
+                            }
                         }
+                    } else {
+                        Text("Loading...")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 22)
+                            .padding(.vertical, 4)
                     }
                 } label: {
                     rowLabel(systemImage: "folder.fill", tint: Color.yellow.opacity(0.9))
+                }
+                .onChange(of: isExpanded) { _, expanded in
+                    if expanded {
+                        workspace.loadChildrenIfNeeded(for: item.url)
+                    }
                 }
             } else {
                 Button {
@@ -1050,6 +1126,8 @@ private struct TextPaneView: View {
                         currentLineNumber: workspace.currentLineNumber,
                         fontSize: workspace.editorFontSize,
                         wrapsLines: workspace.wrapsLines,
+                        highlightsCurrentLine: workspace.highlightsCurrentLine,
+                        showsInvisibleCharacters: workspace.showsInvisibleCharacters,
                         searchRanges: workspace.search.results.map(\.range),
                         selectedSearchRange: workspace.search.results.first(where: { $0.id == workspace.search.selectedResultID })?.range,
                         onOpenDroppedURL: { url in
@@ -1059,6 +1137,13 @@ private struct TextPaneView: View {
                             } else {
                                 workspace.openFile(url)
                             }
+                        },
+                        onViewportChange: { topLine, visibleLineCount, totalLineCount in
+                            workspace.updateEditorViewport(
+                                topLine: topLine,
+                                visibleLineCount: visibleLineCount,
+                                totalLineCount: totalLineCount
+                            )
                         },
                         text: textBinding,
                         selectedRange: $workspace.activeSelectionRange
@@ -1159,11 +1244,24 @@ private struct TextInspectorView: View {
                 inspectorRow("Words", value: "\(wordCount)")
                 inspectorRow("Chars", value: "\(characterCount)")
                 inspectorRow("Cursor", value: "Ln \(workspace.currentLineNumber)")
-                inspectorRow("State", value: document?.isDirty == true ? "Unsaved" : "Saved")
+                inspectorRow("State", value: documentStateText)
+                if document?.metadata.isPartialPreview == true {
+                    inspectorRow("Preview", value: "Partial")
+                }
                 inspectorRow("Type", value: document?.metadata.kindName ?? "-")
                 inspectorRow("Encoding", value: document?.metadata.encodingName ?? "-")
                 inspectorRow("Line End", value: document?.metadata.lineEnding.rawValue ?? "-")
                 inspectorRow("Access", value: document?.metadata.isReadOnly == true ? "Read Only" : "Writable")
+                inspectorRow("Current Line", value: workspace.highlightsCurrentLine ? "On" : "Off")
+                inspectorRow("Invisibles", value: workspace.showsInvisibleCharacters ? "On" : "Off")
+            }
+
+            if hasExternalConflict {
+                Button("Save As...") {
+                    saveDocumentAs()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
 
             Divider().overlay(Color.white.opacity(0.05))
@@ -1173,21 +1271,46 @@ private struct TextInspectorView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(minimapLines.indices, id: \.self) { index in
-                            Button {
-                                workspace.goToLine(index + 1)
-                            } label: {
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(minimapColor(for: index + 1))
-                                    .frame(width: minimapWidth(for: minimapLines[index]), height: 4)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                GeometryReader { proxy in
+                    let overlayHeight = viewportOverlayHeight(in: proxy.size.height)
+                    let overlayOffset = viewportOverlayOffset(in: proxy.size.height, overlayHeight: overlayHeight)
+
+                    ScrollViewReader { scrollProxy in
+                        ScrollView {
+                            ZStack(alignment: .topLeading) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    ForEach(minimapLines.indices, id: \.self) { index in
+                                        Button {
+                                            workspace.goToLine(index + 1)
+                                        } label: {
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .fill(minimapColor(for: index + 1))
+                                                .frame(width: minimapWidth(for: minimapLines[index]), height: 4)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .id(index + 1)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.accentColor.opacity(0.95), lineWidth: 1)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(Color.accentColor.opacity(0.12))
+                                    )
+                                    .frame(height: overlayHeight)
+                                    .offset(y: overlayOffset)
+                                    .allowsHitTesting(false)
                             }
-                            .buttonStyle(.plain)
+                        }
+                        .onChange(of: workspace.editorViewport.topLine) { _, newTopLine in
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                scrollProxy.scrollTo(min(max(newTopLine, 1), minimapLines.count), anchor: .center)
+                            }
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(10)
@@ -1227,12 +1350,39 @@ private struct TextInspectorView: View {
         text.count
     }
 
+    private var documentStateText: String {
+        if hasExternalConflict {
+            return "Disk Conflict"
+        }
+        return document?.isDirty == true ? "Unsaved" : "Saved"
+    }
+
+    private var hasExternalConflict: Bool {
+        workspace.hasExternalConflict(for: document?.id)
+    }
+
+    private func saveDocumentAs() {
+        guard let document else { return }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = document.title
+
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try workspace.saveDocument(documentID: document.id, as: url)
+            } catch {
+                workspace.setFileSystemError("Failed to save file: \(document.title) (\(error.localizedDescription))")
+            }
+        }
+    }
+
     private var minimapLines: [String] {
         let rawLines = logicalLines(in: text)
         if rawLines.isEmpty {
             return [""]
         }
-        return Array(rawLines.prefix(220))
+        return rawLines
     }
 
     private func minimapWidth(for line: String) -> CGFloat {
@@ -1241,10 +1391,35 @@ private struct TextInspectorView: View {
     }
 
     private func minimapColor(for lineNumber: Int) -> Color {
+        if viewportContains(lineNumber) {
+            return Color.accentColor.opacity(lineNumber == workspace.currentLineNumber ? 0.95 : 0.6)
+        }
         if lineNumber == workspace.currentLineNumber {
             return Color.accentColor.opacity(0.9)
         }
         return lineNumber == 1 ? Color.white.opacity(0.32) : Color.white.opacity(0.16)
+    }
+
+    private func viewportContains(_ lineNumber: Int) -> Bool {
+        let startLine = workspace.editorViewport.topLine
+        let endLine = min(
+            workspace.editorViewport.topLine + workspace.editorViewport.visibleLineCount - 1,
+            workspace.editorViewport.totalLineCount
+        )
+        return (startLine...max(startLine, endLine)).contains(lineNumber)
+    }
+
+    private func viewportOverlayHeight(in availableHeight: CGFloat) -> CGFloat {
+        let totalLines = max(minimapLines.count, 1)
+        let ratio = CGFloat(min(workspace.editorViewport.visibleLineCount, totalLines)) / CGFloat(totalLines)
+        return max(18, availableHeight * ratio)
+    }
+
+    private func viewportOverlayOffset(in availableHeight: CGFloat, overlayHeight: CGFloat) -> CGFloat {
+        let totalLines = max(minimapLines.count, 1)
+        let maxOffset = max(availableHeight - overlayHeight, 0)
+        let normalizedTop = CGFloat(max(workspace.editorViewport.topLine - 1, 0)) / CGFloat(totalLines)
+        return min(maxOffset, max(0, normalizedTop * availableHeight))
     }
 }
 
@@ -1298,10 +1473,15 @@ private struct StatusBarView: View {
             Text(workspace.workspaceTitle)
             Spacer()
             Text(workspace.activeDocument?.title ?? "No File")
-            Text(workspace.activeDocument?.isDirty == true ? "Unsaved" : "Saved")
+            Text(documentStateText)
+                .foregroundStyle(workspace.hasExternalConflict(for: workspace.activeDocument?.id) ? Color.orange.opacity(0.95) : .secondary)
             if let document = workspace.activeDocument {
                 Text(document.metadata.kindName)
                 Text(document.metadata.encodingName)
+                if document.metadata.isPartialPreview {
+                    Text("Partial Preview")
+                        .foregroundStyle(Color.orange.opacity(0.95))
+                }
             }
             Text("Ln \(workspace.currentLineNumber), Col \(workspace.currentColumnNumber)")
             if !workspace.search.query.isEmpty {
@@ -1321,5 +1501,12 @@ private struct StatusBarView: View {
             return "Find \(current)/\(workspace.search.results.count)\(workspace.search.isCaseSensitive ? " Aa" : "")"
         }
         return "Find 0/\(workspace.search.results.count)\(workspace.search.isCaseSensitive ? " Aa" : "")"
+    }
+
+    private var documentStateText: String {
+        if workspace.hasExternalConflict(for: workspace.activeDocument?.id) {
+            return "Disk Conflict"
+        }
+        return workspace.activeDocument?.isDirty == true ? "Unsaved" : "Saved"
     }
 }

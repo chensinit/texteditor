@@ -50,5 +50,24 @@ private struct EditorCommandMenu: Commands {
             .keyboardShortcut("l", modifiers: [.command])
             .disabled(workspace?.activeDocument == nil)
         }
+
+        CommandMenu("Recent Files") {
+            if let workspace, !workspace.recentFiles.isEmpty {
+                ForEach(workspace.recentFiles, id: \.path) { url in
+                    Button(url.lastPathComponent) {
+                        workspace.openRecentFile(url)
+                    }
+                }
+
+                Divider()
+
+                Button("Clear Recent Files") {
+                    workspace.clearRecentFiles()
+                }
+            } else {
+                Button("No Recent Files") {}
+                    .disabled(true)
+            }
+        }
     }
 }
